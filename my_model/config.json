@@ -1,0 +1,40 @@
+{
+  "dataset_path": "/home/alien/simulation/robot-colosseum/dataset/close_box",
+  "batch_size": 8,
+  "sequence_length": 4,
+  "action_horizon": 2,
+  "num_workers": 0,
+  "image_size": [
+    224,
+    224
+  ],
+  "normalize_actions": true,
+  "augment_images": true,
+  "cameras": [
+    "front_rgb"
+  ],
+  "image_types": [
+    "rgb"
+  ],
+  "load_depth": false,
+  "load_point_clouds": false,
+  "subsample_factor": 1,
+  "max_episodes_per_task": null,
+  "action_dim": 7,
+  "state_dim": 15,
+  "vision_feature_dim": 256,
+  "hidden_dim": 256,
+  "num_diffusion_steps": 50,
+  "num_layers": 2,
+  "num_heads": 4,
+  "dropout": 0.1,
+  "num_epochs": 50,
+  "learning_rate": 0.0001,
+  "weight_decay": 0.0001,
+  "grad_clip_norm": 1.0,
+  "use_amp": true,
+  "patience": 15,
+  "save_dir": "./my_model",
+  "max_train_batches": 0,
+  "max_val_batches": 0
+}

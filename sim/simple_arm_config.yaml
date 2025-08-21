@@ -1,0 +1,35 @@
+data:
+  # 数据配置
+  save_path: /tmp/robot_arm_data/
+  image_size: [128, 128]
+  renderer: opengl3
+  episodes_per_task: 1
+  
+  # 图像类型配置
+  images:
+    rgb: true
+    depth: true
+    mask: false
+    point_cloud: false
+    
+  # 相机配置
+  cameras:
+    left_shoulder: true
+    right_shoulder: true
+    overhead: true
+    wrist: true
+    front: true
+    
+  # 其他配置
+  depth_in_meters: false
+  masks_as_one_channel: true
+
+env:
+  # 环境配置
+  task_name: "basketball_in_hoop"
+  seed: 42
+  
+  scene:
+    # 不使用任何变化因子，保持环境简单
+    factors: []
+
