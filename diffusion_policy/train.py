@@ -337,7 +337,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=50, help='训练轮数')
     parser.add_argument('--batch_size', type=int, default=8, help='批次大小')
     parser.add_argument('--lr', type=float, default=1e-4, help='学习率')
-    parser.add_argument('--save_dir', type=str, default='./my_model', help='保存目录')
+    parser.add_argument('--save_dir', type=str, default='./diffusion_policy/my_model', help='保存目录')
     
     args = parser.parse_args()
     

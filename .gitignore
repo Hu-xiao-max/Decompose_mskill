@@ -167,3 +167,4 @@ dataset/
 diffusion_policy/checkpoints/
 *.pth
 *.pt
+diffusion_policy/my_model/

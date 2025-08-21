@@ -22,7 +22,9 @@ from rlbench.action_modes.gripper_action_modes import Discrete
 # Colosseum导入
 from colosseum.rlbench.extensions.environment import EnvironmentExt
 from colosseum.rlbench.utils import ObservationConfigExt
-from colosseum.rlbench.tasks.basketball_in_hoop import BasketballInHoop
+
+# from colosseum.rlbench.tasks.basketball_in_hoop import BasketballInHoop
+from colosseum.rlbench.tasks import *
 
 # 添加diffusion_policy路径
 import sys
@@ -102,7 +104,9 @@ class DiffusionInference:
         if image.dtype != np.uint8:
             image = (image * 255).astype(np.uint8)
         image_pil = Image.fromarray(image)
-        image_tensor = self.transform(image_pil).to(self.device)
+        # transform返回的是tensor，移动到设备
+        tensor_result = self.transform(image_pil)
+        image_tensor = tensor_result.to(self.device)  # type: ignore
         
         # 获取状态
         state = []
@@ -190,12 +194,15 @@ class DiffusionInference:
 
 
 def main():
+    class_task_name = 'CloseBox'
+    load_path='/home/alien/simulation/robot-colosseum/diffusion_policy/my_model/'+class_task_name
+
     parser = argparse.ArgumentParser(description='Basketball in Hoop推理')
     parser.add_argument('--model', type=str, 
-                       default='./diffusion_policy/my_model/basket_in_hoop.pth',
+                       default=load_path + '/best_model.pth',
                        help='模型路径')
     parser.add_argument('--config', type=str,
-                       default='./diffusion_policy/my_model/config.json',
+                       default=load_path + '/config.json',
                        help='配置文件')
     parser.add_argument('--episodes', type=int, default=1, help='测试回合数')
     parser.add_argument('--headless', action='store_true', help='无头模式')
@@ -204,7 +211,6 @@ def main():
     args = parser.parse_args()
     
     print("=" * 50)
-    print("Basketball in Hoop - JointVelocity推理")
     print("=" * 50)
     
     # 创建推理器
@@ -229,7 +235,7 @@ def main():
     env_config = DictConfig({
         'seed': 42,
         'scene': {'factors': []},
-        'task_name': 'basketball_in_hoop'
+        'task_name': class_task_name
     })
     
     # 创建环境
@@ -246,7 +252,16 @@ def main():
     )
     
     env.launch()
-    task = env.get_task(BasketballInHoop)
+    
+    # 根据任务名获取任务类
+    if class_task_name == 'CloseBox':
+        from colosseum.rlbench.tasks.close_box import CloseBox
+        task = env.get_task(CloseBox)
+    elif class_task_name == 'BasketballInHoop':
+        from colosseum.rlbench.tasks.basketball_in_hoop import BasketballInHoop
+        task = env.get_task(BasketballInHoop)
+    else:
+        raise ValueError(f"不支持的任务: {class_task_name}")
     
     print("✓ 环境创建成功")
     
