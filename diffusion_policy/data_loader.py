@@ -1,5 +1,5 @@
 """
-完整的Colosseum数据集加载器
+完整的Colosseum数据集加载器 - 支持多相机视角
 包含完整的RLBench支持和高级数据处理功能
 """
 
@@ -13,11 +13,12 @@ import torchvision.transforms as transforms
 from typing import Dict, List, Tuple, Optional
 import glob
 import cv2
-# from scipy.spatial.transform import Rotation  # 暂时注释掉，如果不需要的话
+import warnings
+warnings.filterwarnings('ignore')
 
 
 class ColosseumDataset(Dataset):
-    """完整的Colosseum数据集类"""
+    """完整的Colosseum数据集类 - 支持多相机视角"""
     
     def __init__(
         self, 
@@ -28,12 +29,13 @@ class ColosseumDataset(Dataset):
         image_size: Tuple[int, int] = (224, 224),
         normalize_actions: bool = True,
         augment_images: bool = True,
-        cameras: List[str] = ['front_rgb'],
+        cameras: List[str] = ['front_rgb', 'left_shoulder_rgb', 'right_shoulder_rgb'],
         image_types: List[str] = ['rgb'],
         load_depth: bool = False,
         load_point_clouds: bool = False,
         subsample_factor: int = 1,
-        max_episodes_per_task: Optional[int] = None
+        max_episodes_per_task: Optional[int] = None,
+        require_all_cameras: bool = True  # 是否要求所有相机都存在
     ):
         """
         初始化数据集
@@ -52,6 +54,7 @@ class ColosseumDataset(Dataset):
             load_point_clouds: 是否加载点云数据
             subsample_factor: 数据子采样因子
             max_episodes_per_task: 每个任务的最大episode数
+            require_all_cameras: 是否要求所有指定的相机都存在
         """
         self.dataset_path = dataset_path
         self.sequence_length = sequence_length
@@ -63,6 +66,10 @@ class ColosseumDataset(Dataset):
         self.load_depth = load_depth
         self.load_point_clouds = load_point_clouds
         self.subsample_factor = subsample_factor
+        self.augment_images = augment_images
+        self.require_all_cameras = require_all_cameras
+        
+        print(f"初始化数据集，使用相机: {self.cameras}")
         
         # 图像预处理
         self.image_transform = self._create_image_transform(augment_images)
@@ -84,32 +91,29 @@ class ColosseumDataset(Dataset):
     
     def _create_image_transform(self, augment: bool) -> transforms.Compose:
         """创建图像预处理流水线"""
-        transform_list = [
-            transforms.Resize(self.image_size),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                               std=[0.229, 0.224, 0.225])
-        ]
-        
         if augment:
-            # 数据增强
-            augmentation_list = [
+            # 训练时的数据增强
+            transform_list = [
+                transforms.Resize(self.image_size),
                 transforms.ColorJitter(
                     brightness=0.1, contrast=0.1, 
                     saturation=0.1, hue=0.05
                 ),
-                transforms.RandomRotation(5),
-                transforms.RandomResizedCrop(
-                    self.image_size, scale=(0.9, 1.0), ratio=(0.9, 1.1)
-                ),
-                transforms.RandomHorizontalFlip(p=0.1),
-                transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 0.2))
+                transforms.RandomApply([
+                    transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 0.2))
+                ], p=0.3),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                                   std=[0.229, 0.224, 0.225])
             ]
-            
-            # 随机应用增强
-            for aug in augmentation_list:
-                if np.random.rand() < 0.3:  # 30%概率应用每种增强
-                    transform_list.insert(-2, aug)
+        else:
+            # 验证时的简单预处理
+            transform_list = [
+                transforms.Resize(self.image_size),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                                   std=[0.229, 0.224, 0.225])
+            ]
         
         return transforms.Compose(transform_list)
     
@@ -118,12 +122,22 @@ class ColosseumDataset(Dataset):
         episodes = []
         
         # 获取所有任务目录
-        task_dirs = [d for d in os.listdir(self.dataset_path) 
-                    if os.path.isdir(os.path.join(self.dataset_path, d)) and '_' in d]
+        if not os.path.exists(self.dataset_path):
+            raise ValueError(f"数据集路径不存在: {self.dataset_path}")
         
-        for task_dir in task_dirs:
+        task_dirs = [d for d in os.listdir(self.dataset_path) 
+                    if os.path.isdir(os.path.join(self.dataset_path, d))]
+        
+        # 统计相机可用性
+        camera_stats = {cam: 0 for cam in self.cameras}
+        skipped_episodes = 0
+        
+        for task_dir in sorted(task_dirs):
             # 提取任务名
-            task_name = '_'.join(task_dir.split('_')[:-1])
+            if '_' in task_dir:
+                task_name = '_'.join(task_dir.split('_')[:-1])
+            else:
+                task_name = task_dir
             
             # 如果指定了任务列表，则过滤
             if tasks is not None and task_name not in tasks:
@@ -132,71 +146,141 @@ class ColosseumDataset(Dataset):
             task_path = os.path.join(self.dataset_path, task_dir)
             task_episodes = []
             
-            # 查找episode目录
-            for variation_dir in ['variation0', 'episodes']:
-                if variation_dir == 'variation0':
-                    episodes_base = os.path.join(task_path, variation_dir, 'episodes')
-                else:
-                    episodes_base = os.path.join(task_path, variation_dir)
-                
-                if not os.path.exists(episodes_base):
+            # 查找episode目录 - 支持多种目录结构
+            episode_paths = []
+            
+            # 检查 variation0/episodes 结构
+            variation0_path = os.path.join(task_path, 'variation0', 'episodes')
+            if os.path.exists(variation0_path):
+                episode_dirs = [d for d in os.listdir(variation0_path) 
+                              if d.startswith('episode') and 
+                              os.path.isdir(os.path.join(variation0_path, d))]
+                episode_paths.extend([os.path.join(variation0_path, d) for d in episode_dirs])
+            
+            # 检查 episodes 结构
+            episodes_path = os.path.join(task_path, 'episodes')
+            if os.path.exists(episodes_path):
+                episode_dirs = [d for d in os.listdir(episodes_path) 
+                              if d.startswith('episode') and 
+                              os.path.isdir(os.path.join(episodes_path, d))]
+                episode_paths.extend([os.path.join(episodes_path, d) for d in episode_dirs])
+            
+            # 检查直接的 episode 目录
+            direct_episodes = [d for d in os.listdir(task_path) 
+                             if d.startswith('episode') and 
+                             os.path.isdir(os.path.join(task_path, d))]
+            episode_paths.extend([os.path.join(task_path, d) for d in direct_episodes])
+            
+            # 去重
+            episode_paths = list(set(episode_paths))
+            
+            for episode_path in sorted(episode_paths):
+                # 检查必要的文件是否存在
+                low_dim_file = os.path.join(episode_path, 'low_dim_obs.pkl')
+                if not os.path.exists(low_dim_file):
                     continue
                 
-                # 找到所有episode目录
-                episode_dirs = [d for d in os.listdir(episodes_base) 
-                              if d.startswith('episode') and 
-                              os.path.isdir(os.path.join(episodes_base, d))]
+                # 检查相机数据
+                valid_cameras = []
+                missing_cameras = []
                 
-                for episode_dir in sorted(episode_dirs):
-                    episode_path = os.path.join(episodes_base, episode_dir)
-                    
-                    # 检查必要的文件是否存在
-                    low_dim_file = os.path.join(episode_path, 'low_dim_obs.pkl')
-                    if not os.path.exists(low_dim_file):
-                        continue
-                    
-                    # 检查相机数据
-                    valid_cameras = []
-                    for camera in self.cameras:
-                        camera_path = os.path.join(episode_path, camera)
-                        if os.path.exists(camera_path):
-                            image_files = [f for f in os.listdir(camera_path) 
-                                         if f.endswith('.png')]
-                            if len(image_files) >= self.sequence_length + self.action_horizon:
-                                valid_cameras.append(camera)
-                    
-                    if valid_cameras:
-                        # 计算episode长度
-                        camera_path = os.path.join(episode_path, valid_cameras[0])
+                for camera in self.cameras:
+                    camera_path = os.path.join(episode_path, camera)
+                    if os.path.exists(camera_path):
                         image_files = [f for f in os.listdir(camera_path) 
                                      if f.endswith('.png')]
-                        episode_length = len(image_files)
-                        
-                        if episode_length >= self.sequence_length + self.action_horizon:
-                            task_episodes.append({
-                                'task_name': task_name,
-                                'task_dir': task_dir,
-                                'episode_path': episode_path,
-                                'length': episode_length,
-                                'cameras': valid_cameras,
-                                'variation': variation_dir
-                            })
+                        if len(image_files) >= self.sequence_length + self.action_horizon:
+                            valid_cameras.append(camera)
+                            camera_stats[camera] += 1
+                        else:
+                            missing_cameras.append(camera)
+                    else:
+                        missing_cameras.append(camera)
+                
+                # 决定是否使用这个episode
+                if self.require_all_cameras:
+                    # 严格模式：要求所有相机都存在
+                    if len(valid_cameras) == len(self.cameras):
+                        episode_info = self._create_episode_info(
+                            episode_path, task_name, task_dir, valid_cameras
+                        )
+                        if episode_info:
+                            task_episodes.append(episode_info)
+                    else:
+                        skipped_episodes += 1
+                        if skipped_episodes <= 5:  # 只打印前几个警告
+                            print(f"跳过 {episode_path}: 缺少相机 {missing_cameras}")
+                else:
+                    # 宽松模式：只要有至少一个相机就可以
+                    if valid_cameras:
+                        episode_info = self._create_episode_info(
+                            episode_path, task_name, task_dir, valid_cameras
+                        )
+                        if episode_info:
+                            task_episodes.append(episode_info)
+                    else:
+                        skipped_episodes += 1
             
             # 限制每个任务的episode数量
             if max_per_task and len(task_episodes) > max_per_task:
                 task_episodes = task_episodes[:max_per_task]
             
             episodes.extend(task_episodes)
+            
+            if task_episodes:
+                print(f"任务 {task_name}: 加载了 {len(task_episodes)} 个episodes")
+        
+        # 打印相机统计
+        print(f"\n相机可用性统计:")
+        for cam, count in camera_stats.items():
+            print(f"  {cam}: {count} episodes")
+        
+        if skipped_episodes > 0:
+            print(f"\n总共跳过了 {skipped_episodes} 个episodes (相机不完整)")
         
         return episodes
+    
+    def _create_episode_info(self, episode_path: str, task_name: str, 
+                           task_dir: str, valid_cameras: List[str]) -> Optional[Dict]:
+        """创建episode信息字典"""
+        # 计算episode长度
+        camera_path = os.path.join(episode_path, valid_cameras[0])
+        image_files = [f for f in os.listdir(camera_path) if f.endswith('.png')]
+        episode_length = len(image_files)
+        
+        if episode_length >= self.sequence_length + self.action_horizon:
+            return {
+                'task_name': task_name,
+                'task_dir': task_dir,
+                'episode_path': episode_path,
+                'length': episode_length,
+                'cameras': valid_cameras,
+                'variation': 'unknown'  # 可以从路径推断
+            }
+        return None
     
     def _compute_action_stats(self):
         """计算动作统计信息用于归一化"""
         print("计算动作统计信息...")
+        
+        # 如果没有episodes，使用默认值
+        if not self.episodes:
+            print("警告: 没有episodes可用，使用默认动作统计")
+            self.action_mean = np.zeros(7)
+            self.action_std = np.ones(7)
+            return
+        
         all_actions = []
         
         # 采样一部分episodes来计算统计信息
-        sample_episodes = self.episodes[::max(1, len(self.episodes) // 50)]
+        sample_size = min(50, len(self.episodes))
+        if sample_size == 0:
+            print("警告: 没有episodes可用于计算统计信息")
+            self.action_mean = np.zeros(7)
+            self.action_std = np.ones(7)
+            return
+            
+        sample_episodes = self.episodes[::max(1, len(self.episodes) // sample_size)] if sample_size > 0 else []
         
         for episode_info in sample_episodes:
             try:
@@ -205,10 +289,9 @@ class ColosseumDataset(Dataset):
                 
                 for obs in demo_data[::self.subsample_factor]:
                     if hasattr(obs, 'joint_velocities') and obs.joint_velocities is not None:
-                        all_actions.append(obs.joint_velocities)
+                        all_actions.append(obs.joint_velocities[:7])
                     elif hasattr(obs, 'joint_positions') and obs.joint_positions is not None:
-                        # 如果没有速度，计算位置差分作为近似速度
-                        all_actions.append(obs.joint_positions)
+                        all_actions.append(obs.joint_positions[:7])
             except Exception as e:
                 print(f"警告: 无法加载 {episode_info['episode_path']}: {e}")
                 continue
@@ -257,9 +340,6 @@ class ColosseumDataset(Dataset):
         images_data = {}
         
         for camera in episode_info['cameras']:
-            if camera not in self.cameras:
-                continue
-                
             camera_path = os.path.join(episode_path, camera)
             image_files = sorted([f for f in os.listdir(camera_path) if f.endswith('.png')],
                                key=lambda x: int(x.split('.')[0]))
@@ -293,16 +373,25 @@ class ColosseumDataset(Dataset):
             # 机器人状态：关节位置 + 末端执行器位置和朝向 + 夹爪状态
             state = []
             
+            # 关节位置 (7维)
             if hasattr(obs, 'joint_positions') and obs.joint_positions is not None:
-                state.extend(obs.joint_positions)
+                joint_pos = obs.joint_positions
+                state.extend(joint_pos[:7] if len(joint_pos) >= 7 else np.pad(joint_pos, (0, 7-len(joint_pos))))
             else:
                 state.extend([0.0] * 7)
             
+            # 夹爪位姿 (7维: x,y,z,qx,qy,qz,qw)
             if hasattr(obs, 'gripper_pose') and obs.gripper_pose is not None:
-                state.extend(obs.gripper_pose)  # [x, y, z, qx, qy, qz, qw]
+                gripper_pose = obs.gripper_pose
+                if len(gripper_pose) >= 7:
+                    state.extend(gripper_pose[:7])
+                else:
+                    # 如果格式不对，使用默认值
+                    state.extend([0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 1.0])
             else:
                 state.extend([0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 1.0])
             
+            # 夹爪开合状态 (1维)
             if hasattr(obs, 'gripper_open') and obs.gripper_open is not None:
                 state.append(float(obs.gripper_open))
             else:
@@ -322,13 +411,16 @@ class ColosseumDataset(Dataset):
             else:
                 actions.append(np.zeros(7))
         
-        robot_states = np.array(robot_states)
-        actions = np.array(actions)
+        robot_states = np.array(robot_states, dtype=np.float32)
+        actions = np.array(actions, dtype=np.float32)
         
         return images_data, robot_states, actions
     
     def _augment_robot_state(self, state: np.ndarray) -> np.ndarray:
         """对机器人状态进行数据增强"""
+        if not self.augment_images:
+            return state
+            
         augmented_state = state.copy()
         
         # 添加少量噪声到关节位置
@@ -343,19 +435,24 @@ class ColosseumDataset(Dataset):
         quat = augmented_state[10:14]
         quat_noise = np.random.normal(0, 0.01, 4)
         quat += quat_noise
-        quat = quat / np.linalg.norm(quat)
+        quat = quat / (np.linalg.norm(quat) + 1e-8)
         augmented_state[10:14] = quat
         
         return augmented_state
     
     def __len__(self) -> int:
         """返回数据集大小"""
+        if not self.episodes:
+            return 0
+            
         total_samples = 0
         for episode_info in self.episodes:
             episode_length = episode_info['length'] // self.subsample_factor
             total_samples += max(0, episode_length - self.sequence_length - self.action_horizon + 1)
-        return total_samples
-    
+        
+        # 确保至少返回1，避免空数据集问题
+        return max(1, total_samples)
+        
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """获取单个样本"""
         # 找到对应的episode和起始位置
@@ -367,21 +464,22 @@ class ColosseumDataset(Dataset):
             episode_length = episode_info['length'] // self.subsample_factor
             max_start_idx = episode_length - self.sequence_length - self.action_horizon + 1
             
-            if current_idx < max_start_idx:
+            if max_start_idx > 0 and current_idx < max_start_idx:
                 start_idx = current_idx
                 break
             
-            current_idx -= max_start_idx
+            if max_start_idx > 0:
+                current_idx -= max_start_idx
             episode_idx += 1
         
         if episode_idx >= len(self.episodes):
+            # 如果索引超出范围，使用最后一个episode
             episode_idx = len(self.episodes) - 1
             episode_info = self.episodes[episode_idx]
             episode_length = episode_info['length'] // self.subsample_factor
             start_idx = max(0, episode_length - self.sequence_length - self.action_horizon)
         else:
             episode_info = self.episodes[episode_idx]
-            start_idx = current_idx
         
         # 加载episode数据
         images_data, robot_states, actions = self._load_episode_data(episode_info)
@@ -390,19 +488,21 @@ class ColosseumDataset(Dataset):
         end_obs_idx = start_idx + self.sequence_length
         end_action_idx = end_obs_idx + self.action_horizon
         
-        # 处理图像序列
+        # 处理所有相机的图像序列
         processed_images = {}
-        for camera, camera_images in images_data.items():
-            if camera not in self.cameras:
-                continue
-                
+        
+        # 只处理实际存在的相机
+        available_cameras = [cam for cam in self.cameras if cam in images_data]
+        
+        for camera in available_cameras:
+            camera_images = images_data[camera]
             image_sequence = camera_images[start_idx:end_obs_idx]
             image_tensors = []
             
             for img in image_sequence:
                 if len(img.shape) == 2:  # 深度图像
                     img_pil = Image.fromarray((img * 255).astype(np.uint8), mode='L')
-                    img_tensor = self.depth_transform(img_pil)
+                    img_tensor = self.depth_transform(img_pil) if self.load_depth else torch.zeros(1, *self.image_size)
                 else:  # RGB图像
                     img_pil = Image.fromarray(img.astype(np.uint8))
                     img_tensor = self.image_transform(img_pil)
@@ -410,11 +510,19 @@ class ColosseumDataset(Dataset):
             
             processed_images[camera] = torch.stack(image_tensors)
         
+        # 如果某些相机缺失，用零填充（仅在非严格模式下）
+        if not self.require_all_cameras:
+            for camera in self.cameras:
+                if camera not in processed_images:
+                    # 创建零张量作为占位符
+                    zero_images = torch.zeros(self.sequence_length, 3, *self.image_size)
+                    processed_images[camera] = zero_images
+        
         # 机器人状态序列
         robot_state_sequence = robot_states[start_idx:end_obs_idx]
         
-        # 数据增强（如果启用）
-        if self.image_transform.transforms and hasattr(self.image_transform.transforms[0], 'brightness'):
+        # 数据增强
+        if self.augment_images:
             augmented_states = []
             for state in robot_state_sequence:
                 augmented_states.append(self._augment_robot_state(state))
@@ -427,6 +535,7 @@ class ColosseumDataset(Dataset):
         if self.normalize_actions:
             action_sequence = (action_sequence - self.action_mean) / self.action_std
         
+        # 构建返回字典
         result = {
             'robot_states': torch.FloatTensor(robot_state_sequence),
             'actions': torch.FloatTensor(action_sequence),
@@ -435,17 +544,17 @@ class ColosseumDataset(Dataset):
             'start_idx': start_idx
         }
         
-        # 添加图像数据
-        for camera, img_tensor in processed_images.items():
-            result[f'images_{camera}'] = img_tensor.float()
+        # 添加每个相机的图像数据
+        for camera in self.cameras:
+            if camera in processed_images:
+                result[f'images_{camera}'] = processed_images[camera].float()
         
-        # 主要图像（用于向后兼容）
+        # 为了向后兼容，保留'images'键指向front_rgb
         if 'front_rgb' in processed_images:
             result['images'] = processed_images['front_rgb'].float()
-        else:
-            # 使用第一个可用的相机
-            first_camera = list(processed_images.keys())[0]
-            result['images'] = processed_images[first_camera].float()
+        elif available_cameras:
+            # 如果没有front_rgb，使用第一个可用的相机
+            result['images'] = processed_images[available_cameras[0]].float()
         
         return result
 
@@ -458,12 +567,18 @@ def create_data_loaders(
     sequence_length: int = 8,
     action_horizon: int = 4,
     num_workers: int = 4,
+    cameras: List[str] = ['front_rgb'],
+    require_all_cameras: bool = True,
+    val_split: float = 0.2,  # 新增验证集比例参数
     **kwargs
 ) -> Tuple[DataLoader, DataLoader]:
-    """创建训练和验证数据加载器"""
+    """
+    创建训练和验证数据加载器
+    """
     
     # 如果没有指定训练和验证任务，则自动分割
     if train_tasks is None and val_tasks is None:
+        # 默认任务列表
         all_tasks = [
             'basketball_in_hoop', 'close_box', 'close_laptop_lid', 'empty_dishwasher',
             'get_ice_from_fridge', 'hockey', 'insert_onto_square_peg', 'meat_on_grill',
@@ -472,32 +587,127 @@ def create_data_loaders(
             'stack_cups', 'straighten_rope', 'turn_oven_on', 'wipe_desk'
         ]
         
-        # 80-20分割
-        split_idx = int(len(all_tasks) * 0.8)
-        train_tasks = all_tasks[:split_idx]
-        val_tasks = all_tasks[split_idx:]
+        # 检查数据集中实际存在的任务
+        available_tasks = []
+        if os.path.exists(dataset_path):
+            for task_dir in os.listdir(dataset_path):
+                if '_' in task_dir:
+                    task_name = '_'.join(task_dir.split('_')[:-1])
+                    if task_name in all_tasks and task_name not in available_tasks:
+                        available_tasks.append(task_name)
+        
+        if not available_tasks:
+            print(f"警告: 在 {dataset_path} 中没有找到标准任务，使用所有目录")
+            available_tasks = None
+        else:
+            print(f"找到 {len(available_tasks)} 个可用任务")
+            
+            # 特殊处理：如果只有一个任务，训练和验证使用同一个任务
+            if len(available_tasks) == 1:
+                print(f"只有一个任务 '{available_tasks[0]}'，训练和验证将使用同一任务的不同episodes")
+                train_tasks = available_tasks
+                val_tasks = available_tasks
+            else:
+                # 多任务时进行80-20分割
+                split_idx = max(1, int(len(available_tasks) * (1 - val_split)))
+                train_tasks = available_tasks[:split_idx]
+                val_tasks = available_tasks[split_idx:]
     
-    print(f"训练任务: {train_tasks}")
-    print(f"验证任务: {val_tasks}")
+    print(f"训练任务: {train_tasks if train_tasks else '所有'}")
+    print(f"验证任务: {val_tasks if val_tasks else '所有'}")
     
-    # 创建数据集
-    train_dataset = ColosseumDataset(
-        dataset_path=dataset_path,
-        tasks=train_tasks,
-        sequence_length=sequence_length,
-        action_horizon=action_horizon,
-        augment_images=True,
-        **kwargs
-    )
+    # 当训练和验证使用相同任务时，需要在episode级别分割
+    if train_tasks == val_tasks and train_tasks is not None:
+        print("训练和验证使用相同任务，将在episode级别进行分割")
+        
+        # 先加载所有数据获取episode信息
+        temp_dataset = ColosseumDataset(
+            dataset_path=dataset_path,
+            tasks=train_tasks,
+            sequence_length=sequence_length,
+            action_horizon=action_horizon,
+            augment_images=False,
+            cameras=cameras,
+            require_all_cameras=require_all_cameras,
+            **kwargs
+        )
+        
+        # 获取所有episodes并分割
+        all_episodes = temp_dataset.episodes
+        if len(all_episodes) > 1:
+            split_idx = max(1, int(len(all_episodes) * (1 - val_split)))
+            train_episodes = all_episodes[:split_idx]
+            val_episodes = all_episodes[split_idx:]
+            
+            print(f"Episode级别分割: {len(train_episodes)} 训练, {len(val_episodes)} 验证")
+            
+            # 创建训练数据集（使用部分episodes）
+            train_dataset = ColosseumDataset(
+                dataset_path=dataset_path,
+                tasks=train_tasks,
+                sequence_length=sequence_length,
+                action_horizon=action_horizon,
+                augment_images=True,
+                cameras=cameras,
+                require_all_cameras=require_all_cameras,
+                **kwargs
+            )
+            train_dataset.episodes = train_episodes
+            
+            # 创建验证数据集（使用另一部分episodes）
+            val_dataset = ColosseumDataset(
+                dataset_path=dataset_path,
+                tasks=val_tasks,
+                sequence_length=sequence_length,
+                action_horizon=action_horizon,
+                augment_images=False,
+                cameras=cameras,
+                require_all_cameras=require_all_cameras,
+                **kwargs
+            )
+            val_dataset.episodes = val_episodes
+            
+        else:
+            print("警告: 只有一个episode，训练和验证将使用相同数据")
+            train_dataset = temp_dataset
+            val_dataset = temp_dataset
+    else:
+        # 不同任务的正常处理
+        print("\n创建训练数据集...")
+        train_dataset = ColosseumDataset(
+            dataset_path=dataset_path,
+            tasks=train_tasks,
+            sequence_length=sequence_length,
+            action_horizon=action_horizon,
+            augment_images=True,
+            cameras=cameras,
+            require_all_cameras=require_all_cameras,
+            **kwargs
+        )
+        
+        print("\n创建验证数据集...")
+        val_dataset = ColosseumDataset(
+            dataset_path=dataset_path,
+            tasks=val_tasks,
+            sequence_length=sequence_length,
+            action_horizon=action_horizon,
+            augment_images=False,
+            cameras=cameras,
+            require_all_cameras=require_all_cameras,
+            **kwargs
+        )
     
-    val_dataset = ColosseumDataset(
-        dataset_path=dataset_path,
-        tasks=val_tasks,
-        sequence_length=sequence_length,
-        action_horizon=action_horizon,
-        augment_images=False,
-        **kwargs
-    )
+    # 检查数据集是否为空
+    if len(train_dataset) == 0:
+        raise ValueError("训练数据集为空，请检查数据路径和配置")
+    
+    if len(val_dataset) == 0:
+        print("警告: 验证数据集为空，将使用训练数据集的一部分作为验证")
+        val_dataset = train_dataset
+    
+    print(f"\n数据集大小:")
+    print(f"  训练集: {len(train_dataset)} 样本")
+    print(f"  验证集: {len(val_dataset)} 样本")
     
     # 创建数据加载器
     train_loader = DataLoader(
@@ -521,33 +731,69 @@ def create_data_loaders(
     return train_loader, val_loader
 
 
-if __name__ == "__main__":
-    # 测试数据加载器
-    dataset_path = "/home/alien/Dataset/colosseum_dataset"
+def test_multi_camera_loading():
+    """测试多相机加载功能"""
+    # 修改为你的数据集路径
+    dataset_path = "/home/alien/simulation/robot-colosseum/dataset/close_box"
     
-    print("测试完整数据加载器...")
+    print("=" * 60)
+    print("测试多相机数据加载")
+    print("=" * 60)
+    
+    # 测试多相机加载
+    cameras = ['front_rgb', 'left_shoulder_rgb', 'right_shoulder_rgb']
+    
     try:
         train_loader, val_loader = create_data_loaders(
             dataset_path=dataset_path,
-            batch_size=4,
+            batch_size=2,
             sequence_length=4,
             action_horizon=2,
             num_workers=0,
-            cameras=['front_rgb'],
-            max_episodes_per_task=5
+            cameras=cameras,
+            image_size=(224, 224),
+            normalize_actions=True,
+            max_episodes_per_task=2,
+            require_all_cameras=False  # 设置为False以处理相机缺失的情况
         )
         
-        print(f"训练数据loader: {len(train_loader)} 批次")
-        print(f"验证数据loader: {len(val_loader)} 批次")
+        print(f"\n成功创建数据加载器:")
+        print(f"  训练批次数: {len(train_loader)}")
+        print(f"  验证批次数: {len(val_loader)}")
         
-        # 加载一个batch看看数据格式
-        for batch in train_loader:
-            print(f"图像形状: {batch['images'].shape}")
-            print(f"机器人状态形状: {batch['robot_states'].shape}")
-            print(f"动作形状: {batch['actions'].shape}")
-            print(f"任务: {batch['task_name']}")
-            break
+        # 测试加载一个批次
+        print("\n加载一个训练批次...")
+        for batch_idx, batch in enumerate(train_loader):
+            print(f"\n批次 {batch_idx + 1} 内容:")
+            print(f"  - robot_states: {batch['robot_states'].shape}")
+            print(f"  - actions: {batch['actions'].shape}")
+            print(f"  - task_name: {batch['task_name']}")
             
+            # 检查每个相机的图像
+            for camera in cameras:
+                key = f'images_{camera}'
+                if key in batch:
+                    print(f"  - {key}: {batch[key].shape}")
+                    # 检查数值范围
+                    print(f"      范围: [{batch[key].min():.2f}, {batch[key].max():.2f}]")
+                else:
+                    print(f"  - {key}: 不存在")
+            
+            # 检查兼容性键
+            if 'images' in batch:
+                print(f"  - images (兼容): {batch['images'].shape}")
+            
+            # 只测试第一个批次
+            break
+        
+        print("\n测试成功!")
+        
     except Exception as e:
-        print(f"测试失败，可能需要完整的RLBench环境: {e}")
-        print("请使用 simple_data_loader.py 作为替代")
+        print(f"\n测试失败: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+if __name__ == "__main__":
+    # 运行测试
+    test_multi_camera_loading()

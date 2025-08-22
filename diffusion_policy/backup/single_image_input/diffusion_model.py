@@ -1,5 +1,5 @@
 """
-Diffusion Policy模型实现 - 支持多相机视角
+Diffusion Policy模型实现
 基于扩散模型的机器人策略学习
 """
 
@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import math
-from typing import Dict, Tuple, Optional, List
+from typing import Dict, Tuple, Optional
 from einops import rearrange
 
 
@@ -159,120 +159,6 @@ class VisionEncoder(nn.Module):
         return features
 
 
-class MultiViewVisionEncoder(nn.Module):
-    """多视角视觉编码器"""
-    
-    def __init__(self, 
-                 num_cameras: int = 3,
-                 input_dim: int = 3, 
-                 feature_dim: int = 512,
-                 fusion_method: str = 'attention'):  # 'concat', 'mean', 'attention'
-        super().__init__()
-        self.num_cameras = num_cameras
-        self.fusion_method = fusion_method
-        self.feature_dim = feature_dim
-        
-        # 为每个相机创建独立的编码器（也可以共享权重）
-        # 选项1：共享编码器
-        self.shared_encoder = VisionEncoder(input_dim, feature_dim)
-        
-        # 选项2：独立编码器（如果需要的话，取消注释）
-        # self.encoders = nn.ModuleList([
-        #     VisionEncoder(input_dim, feature_dim) 
-        #     for _ in range(num_cameras)
-        # ])
-        
-        # 相机位置编码（帮助模型区分不同视角）
-        self.camera_embeddings = nn.Parameter(
-            torch.randn(num_cameras, feature_dim) * 0.02
-        )
-        
-        # 融合机制
-        if fusion_method == 'attention':
-            # 使用注意力机制融合多视角特征
-            self.fusion_attention = nn.MultiheadAttention(
-                feature_dim, 
-                num_heads=8, 
-                dropout=0.1,
-                batch_first=True
-            )
-            self.fusion_norm = nn.LayerNorm(feature_dim)
-        elif fusion_method == 'concat':
-            # 拼接后降维
-            self.fusion_projection = nn.Linear(
-                feature_dim * num_cameras, 
-                feature_dim
-            )
-        # 'mean' 方法不需要额外参数
-    
-    def forward(self, images: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            images: 多视角图像
-                - 如果是单视角: [batch_size, seq_len, 3, H, W]
-                - 如果是多视角: [batch_size, num_cameras, seq_len, 3, H, W]
-        
-        Returns:
-            features: [batch_size, seq_len, feature_dim]
-        """
-        # 检查输入维度判断是否是多视角
-        if len(images.shape) == 5:
-            # 单视角，向后兼容
-            return self.shared_encoder(images)
-        
-        batch_size, num_cameras, seq_len = images.shape[:3]
-        
-        # 编码每个视角
-        camera_features = []
-        for cam_idx in range(num_cameras):
-            # 获取当前相机的图像
-            cam_images = images[:, cam_idx]  # [B, seq_len, 3, H, W]
-            
-            # 通过编码器
-            cam_features = self.shared_encoder(cam_images)  # [B, seq_len, feature_dim]
-            
-            # 添加相机位置编码
-            cam_embedding = self.camera_embeddings[cam_idx].unsqueeze(0).unsqueeze(0)
-            cam_embedding = cam_embedding.expand(batch_size, seq_len, -1)
-            cam_features = cam_features + cam_embedding
-            
-            camera_features.append(cam_features)
-        
-        # 堆叠所有相机特征
-        camera_features = torch.stack(camera_features, dim=1)  # [B, num_cameras, seq_len, feature_dim]
-        
-        # 融合多视角特征
-        if self.fusion_method == 'attention':
-            # 重塑为 [B*seq_len, num_cameras, feature_dim]
-            camera_features = rearrange(camera_features, 'b c s d -> (b s) c d')
-            
-            # 使用自注意力融合不同视角
-            fused_features, _ = self.fusion_attention(
-                camera_features, camera_features, camera_features
-            )
-            fused_features = self.fusion_norm(fused_features + camera_features)
-            
-            # 平均池化得到单一特征
-            fused_features = torch.mean(fused_features, dim=1)  # [B*seq_len, feature_dim]
-            
-            # 重塑回 [B, seq_len, feature_dim]
-            fused_features = rearrange(fused_features, '(b s) d -> b s d', b=batch_size, s=seq_len)
-            
-        elif self.fusion_method == 'concat':
-            # 拼接所有视角特征
-            camera_features = rearrange(camera_features, 'b c s d -> b s (c d)')
-            fused_features = self.fusion_projection(camera_features)
-            
-        elif self.fusion_method == 'mean':
-            # 简单平均
-            fused_features = torch.mean(camera_features, dim=1)  # [B, seq_len, feature_dim]
-        
-        else:
-            raise ValueError(f"Unknown fusion method: {self.fusion_method}")
-        
-        return fused_features
-
-
 class StateEncoder(nn.Module):
     """状态编码器，处理机器人状态信息"""
     
@@ -292,7 +178,7 @@ class StateEncoder(nn.Module):
 
 
 class DiffusionPolicy(nn.Module):
-    """Diffusion Policy主模型 - 支持多视角"""
+    """Diffusion Policy主模型"""
     
     def __init__(
         self,
@@ -304,25 +190,16 @@ class DiffusionPolicy(nn.Module):
         num_diffusion_steps: int = 100,
         num_layers: int = 4,
         num_heads: int = 8,
-        dropout: float = 0.1,
-        num_cameras: int = 1,  # 新增：相机数量
-        fusion_method: str = 'attention'  # 新增：多视角融合方法
+        dropout: float = 0.1
     ):
         super().__init__()
         
         self.action_dim = action_dim
         self.action_horizon = action_horizon
         self.num_diffusion_steps = num_diffusion_steps
-        self.num_cameras = num_cameras
         
-        # 多视角视觉编码器
-        self.vision_encoder = MultiViewVisionEncoder(
-            num_cameras=num_cameras,
-            feature_dim=vision_feature_dim,
-            fusion_method=fusion_method
-        )
-        
-        # 状态编码器
+        # 编码器
+        self.vision_encoder = VisionEncoder(feature_dim=vision_feature_dim)
         self.state_encoder = StateEncoder(state_dim, output_dim=vision_feature_dim)
         
         # 时间嵌入
@@ -379,16 +256,13 @@ class DiffusionPolicy(nn.Module):
         Args:
             noisy_actions: [batch_size, action_horizon, action_dim]
             timesteps: [batch_size]
-            images: 单视角 [batch_size, seq_len, 3, H, W] 或
-                   多视角 [batch_size, num_cameras, seq_len, 3, H, W]
+            images: [batch_size, seq_len, 3, H, W]
             robot_states: [batch_size, seq_len, state_dim]
         """
         batch_size = noisy_actions.shape[0]
         
-        # 编码视觉信息（支持单视角和多视角）
+        # 编码视觉和状态信息
         vision_features = self.vision_encoder(images)  # [B, seq_len, vision_dim]
-        
-        # 编码状态信息
         state_features = self.state_encoder(robot_states)  # [B, seq_len, vision_dim]
         
         # 融合视觉和状态特征
@@ -444,8 +318,8 @@ class DiffusionPolicy(nn.Module):
     def sample(self, images: torch.Tensor, robot_states: torch.Tensor, 
                num_inference_steps: int = 50) -> torch.Tensor:
         """采样生成动作序列"""
-        batch_size = robot_states.shape[0]  # 使用robot_states的batch_size更安全
-        device = robot_states.device
+        batch_size = images.shape[0]
+        device = images.device
         
         # 初始化随机噪声
         actions = torch.randn(batch_size, self.action_horizon, self.action_dim, device=device)
@@ -491,8 +365,6 @@ def create_diffusion_policy(
     action_dim: int = 7,
     action_horizon: int = 4,
     state_dim: int = 15,
-    num_cameras: int = 1,
-    fusion_method: str = 'attention',
     **kwargs
 ) -> DiffusionPolicy:
     """创建Diffusion Policy模型"""
@@ -500,8 +372,6 @@ def create_diffusion_policy(
         action_dim=action_dim,
         action_horizon=action_horizon,
         state_dim=state_dim,
-        num_cameras=num_cameras,
-        fusion_method=fusion_method,
         **kwargs
     )
 
@@ -510,23 +380,14 @@ if __name__ == "__main__":
     # 测试模型
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    # 测试多视角模型
-    print("=" * 60)
-    print("测试多视角Diffusion Policy")
-    print("=" * 60)
-    
-    model = create_diffusion_policy(
-        num_cameras=3,
-        fusion_method='attention'
-    ).to(device)
+    model = create_diffusion_policy().to(device)
     
     batch_size = 2
-    seq_len = 4
+    seq_len = 8
     action_horizon = 4
-    num_cameras = 3
     
-    # 模拟多视角输入数据
-    images = torch.randn(batch_size, num_cameras, seq_len, 3, 224, 224).to(device)
+    # 模拟输入数据
+    images = torch.randn(batch_size, seq_len, 3, 224, 224).to(device)
     robot_states = torch.randn(batch_size, seq_len, 15).to(device)
     actions = torch.randn(batch_size, action_horizon, 7).to(device)
     timesteps = torch.randint(0, 100, (batch_size,)).to(device)
@@ -537,7 +398,6 @@ if __name__ == "__main__":
     # 前向传播
     predicted_noise = model(noisy_actions, timesteps, images, robot_states)
     
-    print(f"多视角图像形状: {images.shape}")
     print(f"输入动作形状: {actions.shape}")
     print(f"噪声动作形状: {noisy_actions.shape}")
     print(f"预测噪声形状: {predicted_noise.shape}")
@@ -546,15 +406,3 @@ if __name__ == "__main__":
     # 测试采样
     sampled_actions = model.sample(images, robot_states, num_inference_steps=10)
     print(f"采样动作形状: {sampled_actions.shape}")
-    
-    print("\n" + "=" * 60)
-    print("测试单视角兼容性")
-    print("=" * 60)
-    
-    # 测试单视角输入（向后兼容）
-    single_images = torch.randn(batch_size, seq_len, 3, 224, 224).to(device)
-    predicted_noise_single = model(noisy_actions, timesteps, single_images, robot_states)
-    print(f"单视角图像形状: {single_images.shape}")
-    print(f"单视角预测噪声形状: {predicted_noise_single.shape}")
-    
-    print("\n测试完成!")

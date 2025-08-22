@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-不带仿真评估的Diffusion Policy训练脚本 - 支持多相机
+不带仿真评估的Diffusion Policy训练脚本
 """
 
 import os
@@ -27,7 +27,7 @@ from diffusion_model import create_diffusion_policy
 
 
 class SimpleTrainer:
-    """简单训练器（无仿真评估）- 支持多相机"""
+    """简单训练器（无仿真评估）"""
     
     def __init__(
         self,
@@ -43,7 +43,7 @@ class SimpleTrainer:
         self.device = device
         self.config = config
         
-        # 优化器 - 使用Adam
+        # 优化器 - 使用Adam，因为AdamW可能不可用
         self.optimizer = optim.Adam(
             self.model.parameters(),
             lr=config['learning_rate'],
@@ -84,48 +84,8 @@ class SimpleTrainer:
             json.dump(config, f, indent=2)
     
     def compute_loss(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """计算损失 - 支持多相机输入"""
-        # 处理多相机图像
-        images_list = []
-        
-        # 收集所有相机的图像
-        for camera in self.config['cameras']:
-            camera_key = f'images_{camera}'
-            if camera_key in batch:
-                images_list.append(batch[camera_key])
-        
-        # 根据相机数量处理图像
-        if len(images_list) == 0:
-            # 向后兼容：如果没有相机特定的键，使用默认的'images'
-            if 'images' in batch:
-                images = batch['images'].to(self.device)
-                # 确保是5维张量 [B, T, C, H, W]
-                if len(images.shape) == 5:
-                    pass  # 已经是正确格式
-                else:
-                    raise ValueError(f"图像维度错误: {images.shape}")
-            else:
-                raise ValueError("批次中没有找到图像数据")
-        elif len(images_list) == 1:
-            # 单相机情况
-            images = images_list[0].to(self.device)
-        else:
-            # 多相机情况 - 堆叠成 [B, num_cameras, T, C, H, W]
-            try:
-                # 确保所有图像具有相同的形状
-                for i, img in enumerate(images_list):
-                    if img.shape != images_list[0].shape:
-                        print(f"警告: 相机 {i} 图像形状 {img.shape} 与第一个相机 {images_list[0].shape} 不匹配")
-                
-                images = torch.stack(images_list, dim=1).to(self.device)
-                # print(f"多相机图像形状: {images.shape}")  # 调试信息
-            except Exception as e:
-                print(f"堆叠图像时出错: {e}")
-                print(f"图像列表长度: {len(images_list)}")
-                for i, img in enumerate(images_list):
-                    print(f"  相机 {i} 形状: {img.shape}")
-                raise
-        
+        """计算损失"""
+        images = batch['images'].to(self.device)
         robot_states = batch['robot_states'].to(self.device)
         actions = batch['actions'].to(self.device)
         
@@ -141,21 +101,13 @@ class SimpleTrainer:
         noisy_actions, noise = self.model.add_noise(actions, timesteps)
         
         # 前向传播
-        try:
-            if self.use_amp:
-                with autocast():
-                    predicted_noise = self.model(noisy_actions, timesteps, images, robot_states)
-                    mse_loss = nn.functional.mse_loss(predicted_noise, noise)
-            else:
+        if self.use_amp:
+            with autocast():
                 predicted_noise = self.model(noisy_actions, timesteps, images, robot_states)
                 mse_loss = nn.functional.mse_loss(predicted_noise, noise)
-        except Exception as e:
-            print(f"模型前向传播错误: {e}")
-            print(f"  噪声动作形状: {noisy_actions.shape}")
-            print(f"  时间步形状: {timesteps.shape}")
-            print(f"  图像形状: {images.shape}")
-            print(f"  机器人状态形状: {robot_states.shape}")
-            raise
+        else:
+            predicted_noise = self.model(noisy_actions, timesteps, images, robot_states)
+            mse_loss = nn.functional.mse_loss(predicted_noise, noise)
         
         losses = {'mse_loss': mse_loss, 'total_loss': mse_loss}
         return losses
@@ -268,12 +220,10 @@ class SimpleTrainer:
     def train(self):
         """主训练循环"""
         print("=" * 60)
-        print("开始训练 Diffusion Policy (多相机支持)")
+        print("开始训练 Diffusion Policy (无仿真评估模式)")
         print("=" * 60)
         print(f"设备: {self.device}")
         print(f"模型参数: {sum(p.numel() for p in self.model.parameters()):,}")
-        print(f"相机数量: {self.config.get('num_cameras', 1)}")
-        print(f"相机列表: {self.config.get('cameras', ['front_rgb'])}")
         print(f"训练集: {len(self.train_loader)} 批次")
         print(f"验证集: {len(self.val_loader)} 批次")
         print("=" * 60)
@@ -338,6 +288,7 @@ def create_simple_config() -> Dict:
     """创建简单训练配置"""
     return {
         # 数据配置
+        # 'dataset_path': '/home/alien/Dataset/colosseum_dataset',
         'dataset_path': '/home/alien/simulation/robot-colosseum/dataset/close_box',
         'batch_size': 8,
         'sequence_length': 4,
@@ -346,12 +297,8 @@ def create_simple_config() -> Dict:
         'image_size': (224, 224),
         'normalize_actions': True,
         'augment_images': True,
-        
-        # 多相机配置
-        'cameras': ['front_rgb', 'left_shoulder_rgb', 'right_shoulder_rgb'],
+        'cameras': ['front_rgb'],
         'image_types': ['rgb'],
-        'require_all_cameras': True,
-        
         'load_depth': False,
         'load_point_clouds': False,
         'subsample_factor': 1,
@@ -359,15 +306,13 @@ def create_simple_config() -> Dict:
         
         # 模型配置
         'action_dim': 7,
-        'state_dim': 15,
+        'state_dim': 15,  # 关节位置(7) + 夹爪位姿(7) + 夹爪状态(1) = 15
         'vision_feature_dim': 256,
         'hidden_dim': 256,
         'num_diffusion_steps': 50,
         'num_layers': 2,
         'num_heads': 4,
         'dropout': 0.1,
-        'num_cameras': 3,  # 相机数量
-        'fusion_method': 'attention',  # 多视角融合方法
         
         # 训练配置
         'num_epochs': 50,
@@ -387,7 +332,7 @@ def create_simple_config() -> Dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Diffusion Policy训练（多相机支持）')
+    parser = argparse.ArgumentParser(description='简单Diffusion Policy训练（无仿真评估）')
     parser.add_argument('--config', type=str, help='配置文件路径 (JSON)')
     parser.add_argument('--epochs', type=int, default=50, help='训练轮数')
     parser.add_argument('--batch_size', type=int, default=8, help='批次大小')
@@ -433,8 +378,7 @@ def main():
             load_depth=config['load_depth'],
             load_point_clouds=config['load_point_clouds'],
             subsample_factor=config['subsample_factor'],
-            max_episodes_per_task=config['max_episodes_per_task'],
-            require_all_cameras=config.get('require_all_cameras', True)
+            max_episodes_per_task=config['max_episodes_per_task']
         )
     except Exception as e:
         print(f"创建数据加载器失败: {e}")
@@ -454,9 +398,7 @@ def main():
         num_diffusion_steps=config['num_diffusion_steps'],
         num_layers=config['num_layers'],
         num_heads=config['num_heads'],
-        dropout=config['dropout'],
-        num_cameras=config.get('num_cameras', 1),
-        fusion_method=config.get('fusion_method', 'attention')
+        dropout=config['dropout']
     )
     
     print(f"模型参数数量: {sum(p.numel() for p in model.parameters()):,}")
@@ -472,6 +414,7 @@ def main():
     
     # 开始训练
     trainer.train()
+
 
 
 if __name__ == "__main__":
