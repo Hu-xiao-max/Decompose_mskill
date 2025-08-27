@@ -16,7 +16,7 @@ from omegaconf import DictConfig
 
 # RLBench导入
 from rlbench.action_modes.action_mode import MoveArmThenGripper
-from rlbench.action_modes.arm_action_modes import JointVelocity
+from rlbench.action_modes.arm_action_modes import JointPosition
 from rlbench.action_modes.gripper_action_modes import Discrete
 
 # Colosseum导入
@@ -258,16 +258,12 @@ class MultiCameraDiffusionInference:
             action = action * self.action_std + self.action_mean
         
         # 分离关节控制和夹爪控制
-        joint_action = action[:7]  # 前7维是关节控制
+        joint_action = action[:7]  # 前7维是关节位置控制
         gripper_action = action[7]  # 第8维是夹爪控制
         
-        # 限制关节速度范围
-        max_velocity = 0.5
-        joint_action = np.clip(joint_action, -max_velocity, max_velocity)
-        
-        # 如果关节动作太小，适当放大
-        if np.abs(joint_action).max() < 0.01:
-            joint_action = joint_action * 10
+        # 对于关节位置控制，不需要限制速度，但需要确保在合理范围内
+        # 关节位置通常在 [-π, π] 范围内
+        joint_action = np.clip(joint_action, -np.pi, np.pi)
         
         # 处理夹爪动作：将连续值转换为离散值
         # 夹爪动作通常是0（关闭）或1（打开）
@@ -288,7 +284,7 @@ class MultiCameraDiffusionInference:
 def main():
     # 任务配置
     class_task_name = 'CloseBox'
-    load_path = '/home/alien/simulation/robot-colosseum/diffusion_policy/my_model/CloseBox_gripper'
+    load_path = '/home/alien/simulation/robot-colosseum/diffusion_policy/my_model/CloseBox_joint_pos'
     
     parser = argparse.ArgumentParser(description='多相机Diffusion Policy推理')
     parser.add_argument('--model', type=str, 
@@ -309,10 +305,7 @@ def main():
                        help='每个episode的最大步数')
     
     args = parser.parse_args()
-    
-    print("=" * 60)
-    print("多相机Diffusion Policy推理")
-    print("=" * 60)
+
     
     # 创建推理器
     inference = MultiCameraDiffusionInference(args.model, args.config, args.device)
@@ -347,7 +340,7 @@ def main():
     # 创建环境
     env = EnvironmentExt(
         action_mode=MoveArmThenGripper(
-            arm_action_mode=JointVelocity(),
+            arm_action_mode=JointPosition(),
             gripper_action_mode=Discrete()
         ),
         obs_config=ObservationConfigExt(data_config),
@@ -406,10 +399,10 @@ def main():
             
             # 显示进度
             if step % 20 == 0:
-                vel_norm = np.linalg.norm(action[:7])
+                pos_norm = np.linalg.norm(action[:7])
                 gripper = action[7]
                 gripper_status = "OPEN" if gripper > 0.5 else "CLOSE"
-                print(f"  Step {step:3d}: |v|={vel_norm:.3f}, gripper={gripper:.1f}({gripper_status})")
+                print(f"  Step {step:3d}: |pos|={pos_norm:.3f}, gripper={gripper:.1f}({gripper_status})")
             
             # # 执行动作（可以重复几次以增加效果）
             # repeat_action = 5

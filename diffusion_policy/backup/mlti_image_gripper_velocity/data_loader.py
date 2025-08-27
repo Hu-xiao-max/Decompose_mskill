@@ -416,19 +416,19 @@ class ColosseumDataset(Dataset):
             # 动作：关节控制 + 夹爪控制
             action_vector = []
             
-            # 关节控制 (7维) - 优先使用关节速度，否则使用关节位置
-            joint_action = None
-            if hasattr(obs, 'joint_velocities') and obs.joint_velocities is not None:
-                joint_action = obs.joint_velocities
-            elif hasattr(obs, 'joint_positions') and obs.joint_positions is not None:
-                joint_action = obs.joint_positions
-
-            # # 关节控制 (7维) - 优先使用关节位置，否则使用关节位速度
+            # # 关节控制 (7维) - 优先使用关节速度，否则使用关节位置
             # joint_action = None
-            # if hasattr(obs, 'joint_positions') and obs.joint_velocities is not None:
-            #     joint_action = obs.joint_positions
-            # elif hasattr(obs, 'joint_velocities') and obs.joint_positions is not None:
+            # if hasattr(obs, 'joint_velocities') and obs.joint_velocities is not None:
             #     joint_action = obs.joint_velocities
+            # elif hasattr(obs, 'joint_positions') and obs.joint_positions is not None:
+            #     joint_action = obs.joint_positions
+
+            # 关节控制 (7维) - 优先使用关节位置，否则使用关节位速度
+            joint_action = None
+            if hasattr(obs, 'joint_positions') and obs.joint_velocities is not None:
+                joint_action = obs.joint_positions
+            elif hasattr(obs, 'joint_velocities') and obs.joint_positions is not None:
+                joint_action = obs.joint_velocities
             
             if joint_action is not None:
                 action_vector.extend(joint_action[:7] if len(joint_action) >= 7 else np.pad(joint_action, (0, 7-len(joint_action))))

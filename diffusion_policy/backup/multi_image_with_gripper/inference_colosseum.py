@@ -287,8 +287,8 @@ class MultiCameraDiffusionInference:
 
 def main():
     # 任务配置
-    class_task_name = 'CloseBox'
-    load_path = '/home/alien/simulation/robot-colosseum/diffusion_policy/my_model/CloseBox_gripper'
+    class_task_name = 'WipeDesk'
+    load_path = '/home/alien/simulation/robot-colosseum/diffusion_policy/my_model/wipe_desk'
     
     parser = argparse.ArgumentParser(description='多相机Diffusion Policy推理')
     parser.add_argument('--model', type=str, 
@@ -365,6 +365,7 @@ def main():
         'BasketballInHoop': 'colosseum.rlbench.tasks.basketball_in_hoop.BasketballInHoop',
         'OpenDrawer': 'colosseum.rlbench.tasks.open_drawer.OpenDrawer',
         'StackCups': 'colosseum.rlbench.tasks.stack_cups.StackCups',
+        'WipeDesk': 'colosseum.rlbench.tasks.wipe_desk.WipeDesk',
     }
     
     if args.task in task_mapping:

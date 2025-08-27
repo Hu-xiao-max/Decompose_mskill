@@ -8,7 +8,8 @@ import json
 import argparse
 import torch
 import torch.nn as nn
-from torch import optim
+import torch.optim as optim
+from torch.optim import Adam
 from torch.utils.data import DataLoader
 from torch.cuda.amp import GradScaler, autocast
 from tqdm import tqdm
@@ -44,7 +45,7 @@ class SimpleTrainer:
         self.config = config
         
         # 优化器 - 使用Adam
-        self.optimizer = optim.Adam(
+        self.optimizer = Adam(
             self.model.parameters(),
             lr=config['learning_rate'],
             weight_decay=config['weight_decay'],
@@ -338,7 +339,7 @@ def create_simple_config() -> Dict:
     """创建简单训练配置"""
     return {
         # 数据配置
-        'dataset_path': '/home/alien/simulation/robot-colosseum/dataset/close_box',
+        'dataset_path': '/home/alien/simulation/robot-colosseum/dataset/wipe_desk',
         'batch_size': 8,
         'sequence_length': 4,
         'action_horizon': 2,
@@ -358,7 +359,7 @@ def create_simple_config() -> Dict:
         'max_episodes_per_task': None,
         
         # 模型配置
-        'action_dim': 7,
+        'action_dim': 8,  # 7个关节 + 1个夹爪
         'state_dim': 15,
         'vision_feature_dim': 256,
         'hidden_dim': 256,
