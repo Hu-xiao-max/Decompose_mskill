@@ -289,23 +289,21 @@ class ColosseumDataset(Dataset):
                 
                 for obs in demo_data[::self.subsample_factor]:
                     action_vector = []
-                    # 关节动作 (7维) - 优先使用关节位置
-                    if hasattr(obs, 'joint_positions') and obs.joint_positions is not None:
-                        joint_action = obs.joint_positions[:7] if len(obs.joint_positions) >= 7 else np.pad(obs.joint_positions, (0, 7-len(obs.joint_positions)))
-                        action_vector.extend(joint_action)
-                    elif hasattr(obs, 'joint_velocities') and obs.joint_velocities is not None:
+                    # 关节动作 (7维)
+                    if hasattr(obs, 'joint_velocities') and obs.joint_velocities is not None:
                         joint_action = obs.joint_velocities[:7] if len(obs.joint_velocities) >= 7 else np.pad(obs.joint_velocities, (0, 7-len(obs.joint_velocities)))
+                        action_vector.extend(joint_action)
+                    elif hasattr(obs, 'joint_positions') and obs.joint_positions is not None:
+                        joint_action = obs.joint_positions[:7] if len(obs.joint_positions) >= 7 else np.pad(obs.joint_positions, (0, 7-len(obs.joint_positions)))
                         action_vector.extend(joint_action)
                     else:
                         action_vector.extend([0.0] * 7)
                     
-                    # 夹爪动作 (1维) - 转换为位置值
+                    # 夹爪动作 (1维)
                     if hasattr(obs, 'gripper_open') and obs.gripper_open is not None:
-                        # 将0/1的开合状态转换为位置值[0.0, 0.04]
-                        gripper_pos = float(obs.gripper_open) * 0.04  # 0->0.0, 1->0.04
-                        action_vector.append(gripper_pos)
+                        action_vector.append(float(obs.gripper_open))
                     else:
-                        action_vector.append(0.02)  # 默认半开状态
+                        action_vector.append(0.5)
                     
                     all_actions.append(action_vector)
             except Exception as e:
@@ -407,38 +405,41 @@ class ColosseumDataset(Dataset):
             else:
                 state.extend([0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 1.0])
             
-            # 夹爪开合状态 (1维) - 转换为位置值
+            # 夹爪开合状态 (1维)
             if hasattr(obs, 'gripper_open') and obs.gripper_open is not None:
-                # 将0/1的开合状态转换为位置值[0.0, 0.04]
-                gripper_pos = float(obs.gripper_open) * 0.04
-                state.append(gripper_pos)
+                state.append(float(obs.gripper_open))
             else:
-                state.append(0.02)  # 默认半开状态
+                state.append(0.5)
             
             robot_states.append(state)
             
             # 动作：关节控制 + 夹爪控制
             action_vector = []
             
-            # 关节控制 (7维) - 优先使用关节位置，否则使用关节速度
+            # 关节控制 (7维) - 优先使用关节速度，否则使用关节位置
             joint_action = None
-            if hasattr(obs, 'joint_positions') and obs.joint_positions is not None:
-                joint_action = obs.joint_positions
-            elif hasattr(obs, 'joint_velocities') and obs.joint_velocities is not None:
+            if hasattr(obs, 'joint_velocities') and obs.joint_velocities is not None:
                 joint_action = obs.joint_velocities
+            elif hasattr(obs, 'joint_positions') and obs.joint_positions is not None:
+                joint_action = obs.joint_positions
+
+            # # 关节控制 (7维) - 优先使用关节位置，否则使用关节位速度
+            # joint_action = None
+            # if hasattr(obs, 'joint_positions') and obs.joint_velocities is not None:
+            #     joint_action = obs.joint_positions
+            # elif hasattr(obs, 'joint_velocities') and obs.joint_positions is not None:
+            #     joint_action = obs.joint_velocities
             
             if joint_action is not None:
                 action_vector.extend(joint_action[:7] if len(joint_action) >= 7 else np.pad(joint_action, (0, 7-len(joint_action))))
             else:
                 action_vector.extend([0.0] * 7)
             
-            # 夹爪控制 (1维) - 转换为位置值
+            # 夹爪控制 (1维) - 夹爪开合状态
             if hasattr(obs, 'gripper_open') and obs.gripper_open is not None:
-                # 将0/1的开合状态转换为位置值[0.0, 0.04]
-                gripper_pos = float(obs.gripper_open) * 0.04  # 0->0.0, 1->0.04
-                action_vector.append(gripper_pos)
+                action_vector.append(float(obs.gripper_open))
             else:
-                action_vector.append(0.02)  # 默认半开状态
+                action_vector.append(0.5)  # 默认半开状态
             
             actions.append(action_vector)
         
@@ -767,6 +768,8 @@ def test_multi_camera_loading():
     """测试多相机加载功能"""
     # 修改为你的数据集路径
     dataset_path = "/home/alien/simulation/robot-colosseum/dataset/wipe_desk"
+    
+    
     # 测试多相机加载
     cameras = ['front_rgb', 'left_shoulder_rgb', 'right_shoulder_rgb']
     

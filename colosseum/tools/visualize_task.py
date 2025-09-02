@@ -13,7 +13,7 @@ OmegaConf.register_new_resolver("eval", eval)
 
 @hydra.main(
     config_path=ASSETS_CONFIGS_FOLDER,
-    config_name="basketball_in_hoop.yaml",
+    config_name="wipe_desk.yaml",
     version_base=None,
 )
 def main(cfg: DictConfig) -> int:

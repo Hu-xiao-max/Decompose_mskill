@@ -27,7 +27,7 @@ from colosseum.rlbench.tasks import *
 # 添加diffusion_policy路径
 import sys
 sys.path.append('/home/alien/simulation/robot-colosseum/diffusion_policy')
-from diffusion_model import create_diffusion_policy
+from diffusion_model import create_improved_diffusion_policy
 
 
 class MultiCameraDiffusionInference:
@@ -91,7 +91,7 @@ class MultiCameraDiffusionInference:
             if 'action_std' in saved_config:
                 self.config['action_std'] = saved_config['action_std']
         
-        model = create_diffusion_policy(
+        model = create_improved_diffusion_policy(
             action_dim=self.config.get('action_dim', 8),  # 默认8维包含夹爪
             action_horizon=self.config.get('action_horizon', 2),
             state_dim=self.config.get('state_dim', 15),
@@ -244,14 +244,22 @@ class MultiCameraDiffusionInference:
         
         # 采样动作
         with torch.no_grad():
+            # print(f"  输入 images 形状: {images.shape}")
+            # print(f"  输入 states 形状: {states.shape}")
+            # print(f"  推理步数: {self.config.get('num_inference_steps', 50)}")
+            
             actions = self.model.sample(
                 images, 
                 states, 
                 num_inference_steps=self.config.get('num_inference_steps', 50)
             )
+            
+            print(f"  采样输出 actions 数值范围: [{actions.min().item():.4f}, {actions.max().item():.4f}]")
         
         # 取第一个动作
         action = actions[0, 0].cpu().numpy()  # [8] - 现在包含夹爪状态
+
+        print(f"action: {action}")
         
         # 反归一化动作（如果训练时进行了归一化）
         if self.config.get('normalize_actions', True):
@@ -261,13 +269,14 @@ class MultiCameraDiffusionInference:
         joint_action = action[:7]  # 前7维是关节控制
         gripper_action = action[7]  # 第8维是夹爪控制
         
-        # 限制关节速度范围
-        max_velocity = 0.5
-        joint_action = np.clip(joint_action, -max_velocity, max_velocity)
+        # # 限制关节速度范围
+        # max_velocity = 2
+        # joint_action = np.clip(joint_action, -max_velocity, max_velocity)
+        print(f"joint_action: {joint_action}")
         
-        # 如果关节动作太小，适当放大
-        if np.abs(joint_action).max() < 0.01:
-            joint_action = joint_action * 10
+        # # 如果关节动作太小，适当放大
+        # if np.abs(joint_action).max() < 0.01:
+        #     joint_action = joint_action * 10
         
         # 处理夹爪动作：将连续值转换为离散值
         # 夹爪动作通常是0（关闭）或1（打开）
@@ -310,9 +319,6 @@ def main():
     
     args = parser.parse_args()
     
-    print("=" * 60)
-    print("多相机Diffusion Policy推理")
-    print("=" * 60)
     
     # 创建推理器
     inference = MultiCameraDiffusionInference(args.model, args.config, args.device)
@@ -411,7 +417,8 @@ def main():
                 vel_norm = np.linalg.norm(action[:7])
                 gripper = action[7]
                 gripper_status = "OPEN" if gripper > 0.5 else "CLOSE"
-                print(f"  Step {step:3d}: |v|={vel_norm:.3f}, gripper={gripper:.1f}({gripper_status})")
+                # print(f"  Step {step:3d}: |v|={vel_norm:.3f}, gripper={gripper:.1f}({gripper_status})")
+                print(f"  Step {step:3d}:  gripper={gripper:.1f}({gripper_status})")
             
             # # 执行动作（可以重复几次以增加效果）
             # repeat_action = 5

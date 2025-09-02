@@ -1,20 +1,10 @@
-<p align="center">
-    <h1 align="center">
-        <img src="resources/media/img_emoji_rss.png" width="50px"/>
-        Colosseum
-    </h1>
-    <h2 align="center">
-        <a href="https://arxiv.org/abs/2402.08191">
-        A Benchmark for Evaluating Generalization for Robotic Manipulation
-        </a>
-    </h2>
-</p>
+# Code change
+## Sim Change
+Under CoppeliaSim installed path: system/usrset.txt Add：
+doNotShowVideoCompressionLibraryLoadError = true
 
-[Wilbert Pumacay<sup>*</sup>][2], [Ishika Singh<sup>*</sup>][3], [Jiafei Duan<sup>*</sup>][4], [Ranjay Krishna][5], [Jesse Thomason][6], [Dieter Fox][7]
 
-<p align="center">
-    <img src="resources/media/gif_perturbation_factors.gif"/>
-</p>
+
 
 Colosseum is a robotic manipulation benchmark built on top of [PyRep][0], which
 implements 20 out of the original 100 tasks from [RLBench][1], and extends it by
