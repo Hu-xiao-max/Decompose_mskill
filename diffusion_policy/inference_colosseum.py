@@ -16,7 +16,10 @@ from omegaconf import DictConfig
 
 # RLBench导入
 from rlbench.action_modes.action_mode import JointPositionActionMode
-
+from omegaconf import DictConfig
+from rlbench.action_modes.action_mode import MoveArmThenGripper
+from rlbench.action_modes.arm_action_modes import JointPosition
+from rlbench.action_modes.gripper_action_modes import Discrete
 # Colosseum导入
 from colosseum.rlbench.extensions.environment import EnvironmentExt
 from colosseum.rlbench.utils import ObservationConfigExt
@@ -79,7 +82,14 @@ class MultiCameraDiffusionInference:
     
     def _load_model(self, model_path: str):
         """加载模型"""
-        checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
+        # 如果同目录存在EMA版本，优先使用EMA模型
+        try:
+            base_dir = os.path.dirname(model_path)
+            ema_candidate = os.path.join(base_dir, 'best_ema_model.pth')
+            load_path = ema_candidate if os.path.exists(ema_candidate) else model_path
+        except Exception:
+            load_path = model_path
+        checkpoint = torch.load(load_path, map_location=self.device, weights_only=False)
         
         # 如果配置中有保存的动作统计，使用它们
         if 'config' in checkpoint:
@@ -100,7 +110,9 @@ class MultiCameraDiffusionInference:
             num_heads=self.config.get('num_heads', 4),
             dropout=self.config.get('dropout', 0.1),
             num_cameras=self.num_cameras,
-            fusion_method=self.config.get('fusion_method', 'attention')
+            fusion_method=self.config.get('fusion_method', 'attention'),
+            prediction_type=self.config.get('prediction_type', 'epsilon'),
+            clip_range=tuple(self.config.get('clip_range', (-1.0, 1.0)))
         )
         
         model.load_state_dict(checkpoint['model_state_dict'])
@@ -242,12 +254,16 @@ class MultiCameraDiffusionInference:
         
         states = torch.stack(self.state_buffer).unsqueeze(0)  # [1, seq_len, state_dim]
         
-        # 采样动作
+        # 采样动作 - 增加采样步数以提高质量
         with torch.no_grad():
             actions = self.model.sample(
-                images, 
-                states, 
-                num_inference_steps=self.config.get('num_inference_steps', 50)
+                images,
+                states,
+                num_inference_steps=self.config.get('num_inference_steps', 100),  # 采样步数
+                guidance_scale=float(self.config.get('guidance_scale', 1.0)),
+                guidance_start=self.config.get('guidance_start', None),
+                guidance_end=self.config.get('guidance_end', None),
+                guidance_schedule=self.config.get('guidance_schedule', 'linear')
             )
             print(f"  采样输出 actions 数值范围: [{actions.min().item():.4f}, {actions.max().item():.4f}]")
         
@@ -261,30 +277,21 @@ class MultiCameraDiffusionInference:
             action = action * self.action_std + self.action_mean
         
         # 分离关节控制和夹爪控制
-        joint_action = action[:7]  # 前7维是关节位置增量
-        gripper_action = action[7]  # 第8维是夹爪控制
+        joint_action = action[:7]  # 前7维是关节绝对位置（训练时使用joint_positions）
+        gripper_continuous = action[7]  # 第8维是夹爪（连续量，训练中为0或0.04）
+
+        # 关节：不再夹到[-1,1]，保持在训练分布范围（可选安全夹取到典型范围）
+        # 如需安全限制，可按Panda关节常见范围夹取：[-2.9, 2.9]
+        # joint_action = np.clip(joint_action, -2.9, 2.9)
+
+        # 夹爪：环境使用Discrete()，需要0/1离散指令
+        # 使用阈值将连续预测映射到开/合；训练中0~0.04，阈值取0.02
+        gripper_open_cmd = 1.0 if gripper_continuous > 0.02 else 0.0
+
+        print(f"gripper_cmd(discrete): {int(gripper_open_cmd)}")
         
-        # 根据JointPositionActionMode的action_bounds限制动作范围
-        # 关节位置增量: [-0.1, 0.1] for each joint
-        # joint_action = np.clip(joint_action, -0.1, 0.1)
-        
-        # 夹爪位置: [0.0, 0.04]，将模型输出映射到这个范围
-        # 假设模型输出的gripper_action在[-1, 1]或[0, 1]范围内
-        if gripper_action < 0:
-            # 如果是负值，映射到[0, 0.02]（较关闭状态）
-            gripper_position = (gripper_action + 1) * 0.02  # [-1,0] -> [0, 0.02]
-        else:
-            # 如果是正值，映射到[0.02, 0.04]（较开放状态）
-            gripper_position = gripper_action * 0.02 
-        
-        # 确保夹爪位置在有效范围内
-        gripper_position = np.clip(gripper_position, 0.0, 0.04)
-        
-        # print(f"joint_action: {joint_action}")
-        print(f"gripper_position: {gripper_position:.4f}")
-        
-        # 组合最终动作
-        final_action = np.append(joint_action, gripper_position)
+        # 组合最终动作（7关节 + 1个离散夹爪命令）
+        final_action = np.append(joint_action, gripper_open_cmd)
         
         return final_action
     
@@ -297,12 +304,14 @@ class MultiCameraDiffusionInference:
 
 def main():
     # 任务配置
-    class_task_name = 'CloseBox'
-    load_path = '/home/alien/simulation/robot-colosseum/diffusion_policy/my_model/wipe_desk_DI_js'
+    class_task_name = 'WipeDesk'
+    # 默认加载存在的最新模型目录（可通过命令行覆盖）
+    load_path = '/home/alien/simulation/robot-colosseum/diffusion_policy/my_model/WipeDesk2'
+    
     
     parser = argparse.ArgumentParser(description='多相机Diffusion Policy推理')
     parser.add_argument('--model', type=str, 
-                       default=f'{load_path}/best_model.pth',
+                       default=f'{load_path}/best_ema_model.pth',
                        help='模型路径')
     parser.add_argument('--config', type=str,
                        default=f'{load_path}/config.json',
@@ -352,13 +361,22 @@ def main():
     })
     
     # 创建环境
+    # env = EnvironmentExt(
+    #     action_mode=JointPositionActionMode(),
+    #     obs_config=ObservationConfigExt(data_config),
+    #     headless=args.headless,
+    #     robot_setup="panda",
+    #     use_variations=False,
+    #     env_config=env_config
+    # )
     env = EnvironmentExt(
-        action_mode=JointPositionActionMode(),
+        action_mode=MoveArmThenGripper(
+            arm_action_mode=JointPosition(),
+            gripper_action_mode=Discrete()
+        ),
         obs_config=ObservationConfigExt(data_config),
         headless=args.headless,
-        robot_setup="panda",
-        use_variations=False,
-        env_config=env_config
+        robot_setup="panda"
     )
     
     env.launch()
@@ -415,21 +433,22 @@ def main():
                 gripper_status = "OPEN" if gripper_pos > 0.02 else "CLOSE"
                 # print(f"  Step {step:3d}: |delta|={joint_delta_norm:.3f}, gripper_pos={gripper_pos:.4f}({gripper_status})")
             
-            # # 执行动作（可以重复几次以增加效果）
-            # repeat_action = 5
-            # for _ in range(repeat_action):
-            #     obs, reward, terminate = task.step(action)
-
-            print(f"action: {action[:7]}")
-            
-            obs, reward, terminate = task.step(action)
+            # 执行动作（减少重复次数）
+            repeat_action = 50  # 重复执行次数
+            print(f"执行动作: {action}")
+            for _ in range(repeat_action):
+                obs, reward, terminate = task.step(action)
+                # time.sleep(0.01)  # 添加小延迟
+            # print(f"action: {action[:7]}")
                 
-            if terminate:
-                success = True
-                print(f"\n✓ 任务完成! (Step {step})")
-                total_success += 1
-                break
-                # time.sleep(0.01)  # 小延迟
+                if terminate:
+                    success = True
+                    print(f"\n✓ 任务完成! (Step {step})")
+                    total_success += 1
+                    break
+                    # time.sleep(0.01)  # 小延迟
+
+            # 如果已成功，跳出外层步进循环
             if success:
                 break
         

@@ -36,7 +36,7 @@ class SinusoidalPositionEmbedding(nn.Module):
 class ResidualBlock(nn.Module):
     """改进的残差块 - 添加了Layer Norm和Dropout"""
     
-    def __init__(self, dim: int, time_emb_dim: int, dropout: float = 0.2):  # 增加dropout
+    def __init__(self, dim: int, time_emb_dim: int, dropout: float = 0.1):  # 减少dropout
         super().__init__()
         self.time_mlp = nn.Sequential(
             nn.SiLU(),
@@ -73,7 +73,7 @@ class ResidualBlock(nn.Module):
 class CrossAttentionBlock(nn.Module):
     """交叉注意力块 - 添加注意力dropout"""
     
-    def __init__(self, dim: int, context_dim: int, num_heads: int = 8, dropout: float = 0.2):
+    def __init__(self, dim: int, context_dim: int, num_heads: int = 8, dropout: float = 0.1):
         super().__init__()
         self.num_heads = num_heads
         self.scale = (dim // num_heads) ** -0.5  # 修正scale计算
@@ -119,41 +119,69 @@ class CrossAttentionBlock(nn.Module):
         return x + self.to_out(out)
 
 
-class SimplifiedVisionEncoder(nn.Module):
-    """简化的视觉编码器 - 适合小数据集"""
+class EnhancedVisionEncoder(nn.Module):
+    """增强的视觉编码器 - 优化用于24GB GPU和RLBench任务"""
     
-    def __init__(self, input_dim: int = 3, feature_dim: int = 256):  # 减小feature_dim
+    def __init__(self, input_dim: int = 3, feature_dim: int = 1024):  # 显著增加feature_dim
         super().__init__()
         
-        # 更简单的网络结构
+        # 更深的网络结构，类似ResNet但针对机器人任务优化
         self.conv_layers = nn.Sequential(
-            # 第一层
-            nn.Conv2d(input_dim, 32, kernel_size=7, stride=2, padding=3, bias=False),
-            nn.BatchNorm2d(32),
+            # Stem layers - 保持更多空间信息
+            nn.Conv2d(input_dim, 64, kernel_size=7, stride=2, padding=3, bias=False),
+            nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
             
-            # 第二层
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.Dropout2d(0.1),  # 添加dropout
-            
-            # 第三层
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1, bias=False),
+            # Block 1 - 提取低级特征
+            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1, bias=False),
             nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(128, 128, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.Dropout2d(0.05),  # 轻微dropout
+            
+            # Block 2 - 中级特征
+            nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, 256, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.Dropout2d(0.05),
+            
+            # Block 3 - 高级特征
+            nn.Conv2d(256, 512, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(512, 512, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(512),
             nn.ReLU(inplace=True),
             nn.Dropout2d(0.1),
             
-            # 全局平均池化
-            nn.AdaptiveAvgPool2d((1, 1))
+            # 空间注意力和全局池化
+            nn.AdaptiveAvgPool2d((2, 2))  # 保留一些空间信息
         )
         
+        # 更复杂的特征映射
         self.fc = nn.Sequential(
-            nn.Linear(128, feature_dim),
-            nn.LayerNorm(feature_dim),  # 添加LayerNorm
+            nn.Linear(512 * 4, feature_dim * 2),  # 更大的中间层
+            nn.LayerNorm(feature_dim * 2),
             nn.ReLU(),
-            nn.Dropout(0.2)  # 添加dropout
+            nn.Dropout(0.15),
+            nn.Linear(feature_dim * 2, feature_dim),
+            nn.LayerNorm(feature_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1)
+        )
+        
+        # 空间注意力机制
+        self.spatial_attention = nn.Sequential(
+            nn.Conv2d(512, 128, kernel_size=1),
+            nn.ReLU(),
+            nn.Conv2d(128, 1, kernel_size=1),
+            nn.Sigmoid()
         )
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -162,9 +190,16 @@ class SimplifiedVisionEncoder(nn.Module):
         # 重塑为[batch_size * seq_len, channels, height, width]
         x = rearrange(x, 'b s c h w -> (b s) c h w')
         
-        # 通过卷积层
-        features = self.conv_layers(x)
-        features = features.view(features.size(0), -1)
+        # 通过卷积层（到空间注意力前）
+        conv_features = self.conv_layers[:-1](x)  # 除了最后的AdaptiveAvgPool2d
+        
+        # 应用空间注意力
+        attention_weights = self.spatial_attention(conv_features)
+        attended_features = conv_features * attention_weights
+        
+        # 全局池化
+        pooled_features = F.adaptive_avg_pool2d(attended_features, (2, 2))
+        features = pooled_features.view(pooled_features.size(0), -1)
         features = self.fc(features)
         
         # 重塑回[batch_size, seq_len, feature_dim]
@@ -180,13 +215,13 @@ class ImprovedDiffusionPolicy(nn.Module):
         self,
         action_dim: int = 8,
         action_horizon: int = 4,
-        vision_feature_dim: int = 256,  # 减小
+        vision_feature_dim: int = 512,  # 增加
         state_dim: int = 15,
-        hidden_dim: int = 256,  # 减小
-        num_diffusion_steps: int = 50,  # 大幅减少！
-        num_layers: int = 3,  # 减少层数
-        num_heads: int = 4,  # 减少注意力头
-        dropout: float = 0.2,  # 增加dropout
+        hidden_dim: int = 512,  # 增加
+        num_diffusion_steps: int = 100,  # 增加到100
+        num_layers: int = 6,  # 增加层数
+        num_heads: int = 8,  # 增加注意力头
+        dropout: float = 0.1,  # 减少dropout
         num_cameras: int = 1,
         fusion_method: str = 'attention',  # 添加这个参数以兼容
         # 新增参数
@@ -205,10 +240,33 @@ class ImprovedDiffusionPolicy(nn.Module):
         self.clip_range = clip_range
         self.prediction_type = prediction_type
         
-        # 简化的视觉编码器
-        self.vision_encoder = SimplifiedVisionEncoder(
+        # 增强的视觉编码器
+        self.vision_encoder = EnhancedVisionEncoder(
             feature_dim=vision_feature_dim
         )
+        
+        # 多视角融合模块
+        self.fusion_method = fusion_method
+        if num_cameras > 1:
+            # 通用相机位置编码
+            self.view_position_embedding = nn.Parameter(
+                torch.randn(num_cameras, vision_feature_dim) * 0.02
+            )
+            if fusion_method == 'attention':
+                self.multi_view_fusion = nn.MultiheadAttention(
+                    embed_dim=vision_feature_dim,
+                    num_heads=num_heads,
+                    dropout=dropout,
+                    batch_first=True
+                )
+            elif fusion_method == 'gated_avg':
+                # 通过可学习门控对不同相机加权
+                self.view_gate = nn.Sequential(
+                    nn.Linear(vision_feature_dim, vision_feature_dim // 2),
+                    nn.ReLU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(vision_feature_dim // 2, 1)
+                )
         
         # 状态编码器 - 添加dropout
         self.state_encoder = nn.Sequential(
@@ -277,15 +335,19 @@ class ImprovedDiffusionPolicy(nn.Module):
             self.register_buffer('sqrt_one_minus_alphas_cumprod_for_v', torch.sqrt(1.0 - self.alphas_cumprod))
     
     def _improved_beta_schedule(self, timesteps: int) -> torch.Tensor:
-        """改进的噪声调度 - 更保守"""
-        # 使用线性调度，更适合小数据集
-        scale = 1000 / timesteps  # 缩放因子
-        beta_start = scale * 0.0001
-        beta_end = scale * 0.02
+        """改进的噪声调度 - 使用cosine调度"""
+        # 使用cosine调度，更适合稳定训练
+        def alpha_bar(t):
+            return np.cos((t + 0.008) / 1.008 * np.pi / 2) ** 2
         
-        betas = torch.linspace(beta_start, beta_end, timesteps)
+        betas = []
+        for i in range(timesteps):
+            t1 = i / timesteps
+            t2 = (i + 1) / timesteps
+            betas.append(min(1 - alpha_bar(t2) / alpha_bar(t1), 0.999))
         
-        # 限制beta的范围
+        betas = torch.tensor(betas, dtype=torch.float32)
+        # 限制beta的范围防止数值不稳定
         return torch.clip(betas, 0.0001, 0.02)
     
     def forward(self, noisy_actions: torch.Tensor, timesteps: torch.Tensor, 
@@ -297,12 +359,44 @@ class ImprovedDiffusionPolicy(nn.Module):
         if len(images.shape) == 5:  # 单视角
             vision_features = self.vision_encoder(images)
         else:  # 多视角
-            # 简单平均多视角特征
+            # 使用注意力机制融合多视角特征
             cam_features = []
             for i in range(images.shape[1]):
                 cam_feat = self.vision_encoder(images[:, i])
                 cam_features.append(cam_feat)
-            vision_features = torch.stack(cam_features, dim=1).mean(dim=1)
+            
+            # 堆叠所有视角特征 [B, num_cameras, T, D]
+            multi_view_features = torch.stack(cam_features, dim=1)  # [B, num_cameras, T, D]
+            
+            if self.fusion_method == 'attention' and hasattr(self, 'multi_view_fusion'):
+                # 添加位置编码
+                B, num_cams, T, D = multi_view_features.shape
+                pos_emb = self.view_position_embedding.unsqueeze(0).unsqueeze(2).expand(B, -1, T, -1)
+                multi_view_features = multi_view_features + pos_emb
+                
+                # 重塑为 [B*T, num_cameras, D] 进行注意力计算
+                mv_reshaped = multi_view_features.view(B*T, num_cams, D)
+                
+                # 多头注意力融合
+                fused_features, _ = self.multi_view_fusion(
+                    mv_reshaped, mv_reshaped, mv_reshaped
+                )
+                
+                # 全局池化所有视角
+                vision_features = fused_features.mean(dim=1).view(B, T, D)
+            elif self.fusion_method == 'gated_avg' and hasattr(self, 'view_gate'):
+                # 学习每个相机的权重并进行加权平均
+                B, num_cams, T, D = multi_view_features.shape
+                # 先在时间上做平均得到每个相机的全局描述
+                cam_global = multi_view_features.mean(dim=2)  # [B, num_cams, D]
+                gates = self.view_gate(cam_global)  # [B, num_cams, 1]
+                weights = torch.softmax(gates, dim=1)  # [B, num_cams, 1]
+                # 将权重应用到时间维度上
+                weights_t = weights.unsqueeze(2)  # [B, num_cams, 1, 1]
+                vision_features = (multi_view_features * weights_t).sum(dim=1)  # [B, T, D]
+            else:
+                # 回退到简单平均
+                vision_features = multi_view_features.mean(dim=1)
         
         # 编码状态信息
         state_features = self.state_encoder(robot_states)
@@ -323,12 +417,12 @@ class ImprovedDiffusionPolicy(nn.Module):
         # Transformer层 - 简化版本
         for layer in self.layers:
             # 交叉注意力
-            x = layer['cross_attn'](x, global_context)
+            x = layer.cross_attn(x, global_context)
             
             # MLP + 时间嵌入
             time_emb_expanded = time_emb.unsqueeze(1).expand(-1, self.action_horizon, -1)
-            x = layer['mlp'](x, time_emb_expanded)
-            x = layer['norm'](x)
+            x = layer.mlp(x, time_emb_expanded)
+            x = layer.norm(x)
         
         # 输出预测
         output = self.output_projection(x)
@@ -361,8 +455,11 @@ class ImprovedDiffusionPolicy(nn.Module):
     
     @torch.no_grad()
     def sample(self, images: torch.Tensor, robot_states: torch.Tensor, 
-               num_inference_steps: int = None,
-               guidance_scale: float = 1.0) -> torch.Tensor:
+               num_inference_steps: Optional[int] = None,
+               guidance_scale: float = 1.0,
+               guidance_start: Optional[float] = None,
+               guidance_end: Optional[float] = None,
+               guidance_schedule: str = 'linear') -> torch.Tensor:
         """改进的采样方法 - DDIM采样"""
         if num_inference_steps is None:
             num_inference_steps = self.num_diffusion_steps
@@ -377,23 +474,76 @@ class ImprovedDiffusionPolicy(nn.Module):
         step_ratio = self.num_diffusion_steps // num_inference_steps
         timesteps = torch.arange(0, self.num_diffusion_steps, step_ratio, device=device).flip(0)
         
-        for i, t in enumerate(timesteps):
-            t_batch = torch.full((batch_size,), t, device=device, dtype=torch.long)
-            
-            # 预测
-            if self.prediction_type == 'v_prediction':
-                v_pred = self(actions, t_batch, images, robot_states)
-                # 从v-prediction恢复噪声和x0
-                alpha_t = self.sqrt_alphas_cumprod_for_v[t]
-                sigma_t = self.sqrt_one_minus_alphas_cumprod_for_v[t]
-                predicted_noise = sigma_t * actions + alpha_t * v_pred
-                x0_pred = alpha_t * actions - sigma_t * v_pred
+        # 指导系数调度
+        if guidance_start is None and guidance_end is None:
+            g_start = g_end = float(guidance_scale)
+        else:
+            g_start = float(guidance_start if guidance_start is not None else guidance_scale)
+            g_end = float(guidance_end if guidance_end is not None else guidance_scale)
+
+        def scale_at(step_idx: int, total_steps: int) -> float:
+            if total_steps <= 1:
+                return g_end
+            frac = step_idx / (total_steps - 1)
+            if guidance_schedule == 'linear':
+                return g_start + (g_end - g_start) * frac
+            elif guidance_schedule == 'cosine':
+                # 慢起快收的日常选择
+                import math
+                return g_start + (g_end - g_start) * (1 - math.cos(math.pi * frac)) / 2
             else:
-                predicted_noise = self(actions, t_batch, images, robot_states)
-                # 预测x0
-                alpha_t = self.sqrt_alphas_cumprod[t]
-                sigma_t = self.sqrt_one_minus_alphas_cumprod[t]
-                x0_pred = (actions - sigma_t * predicted_noise) / (alpha_t + 1e-8)
+                return g_end
+
+        for i, t in enumerate(timesteps):
+            t_batch = torch.full((batch_size,), t.item(), device=device, dtype=torch.long)
+            
+            # 预测（支持Classifier-Free Guidance）
+            cur_guidance = scale_at(i, len(timesteps))
+            if cur_guidance is not None and cur_guidance > 1.0:
+                # 条件预测
+                if self.prediction_type == 'v_prediction':
+                    v_pred_c = self(actions, t_batch, images, robot_states)
+                    alpha_t = self.sqrt_alphas_cumprod[t]
+                    sigma_t = self.sqrt_one_minus_alphas_cumprod[t]
+                    eps_c = sigma_t * actions + alpha_t * v_pred_c
+                    x0_c = alpha_t * actions - sigma_t * v_pred_c
+                else:
+                    eps_c = self(actions, t_batch, images, robot_states)
+                    alpha_t = self.sqrt_alphas_cumprod[t]
+                    sigma_t = self.sqrt_one_minus_alphas_cumprod[t]
+                    x0_c = (actions - sigma_t * eps_c) / (alpha_t + 1e-8)
+
+                # 无条件预测（将条件置零）
+                if images.dim() == 5:
+                    images_u = torch.zeros_like(images)
+                else:
+                    images_u = torch.zeros_like(images)
+                states_u = torch.zeros_like(robot_states)
+
+                if self.prediction_type == 'v_prediction':
+                    v_pred_u = self(actions, t_batch, images_u, states_u)
+                    eps_u = sigma_t * actions + alpha_t * v_pred_u
+                    x0_u = alpha_t * actions - sigma_t * v_pred_u
+                else:
+                    eps_u = self(actions, t_batch, images_u, states_u)
+                    x0_u = (actions - sigma_t * eps_u) / (alpha_t + 1e-8)
+
+                # CFG合成
+                predicted_noise = eps_u + cur_guidance * (eps_c - eps_u)
+                x0_pred = x0_u + cur_guidance * (x0_c - x0_u)
+            else:
+                # 标准条件预测
+                if self.prediction_type == 'v_prediction':
+                    v_pred = self(actions, t_batch, images, robot_states)
+                    alpha_t = self.sqrt_alphas_cumprod[t]
+                    sigma_t = self.sqrt_one_minus_alphas_cumprod[t]
+                    predicted_noise = sigma_t * actions + alpha_t * v_pred
+                    x0_pred = alpha_t * actions - sigma_t * v_pred
+                else:
+                    predicted_noise = self(actions, t_batch, images, robot_states)
+                    alpha_t = self.sqrt_alphas_cumprod[t]
+                    sigma_t = self.sqrt_one_minus_alphas_cumprod[t]
+                    x0_pred = (actions - sigma_t * predicted_noise) / (alpha_t + 1e-8)
             
             # 裁剪x0
             if self.clip_denoised:
@@ -429,13 +579,13 @@ def create_improved_diffusion_policy(
     state_dim: int = 15,
     num_cameras: int = 1,
     fusion_method: str = 'attention',  # 添加这个参数以兼容
-    # 针对小数据集的推荐配置
-    num_diffusion_steps: int = 50,  # 减少步数
-    hidden_dim: int = 256,  # 减小模型
-    num_layers: int = 3,  # 减少层数
-    dropout: float = 0.2,  # 增加dropout
+    # 改进后的推荐配置
+    num_diffusion_steps: int = 100,  # 增加步数
+    hidden_dim: int = 512,  # 增加模型容量
+    num_layers: int = 6,  # 增加层数
+    dropout: float = 0.1,  # 减少dropout
     prediction_type: str = 'epsilon',  # 或 'v_prediction'
-    clip_range: Tuple[float, float] = (-10.0, 10.0),
+    clip_range: Tuple[float, float] = (-1.0, 1.0),  # 更合理的范围
     **kwargs
 ) -> ImprovedDiffusionPolicy:
     """创建改进的Diffusion Policy模型"""
@@ -456,32 +606,34 @@ def create_improved_diffusion_policy(
 
 
 if __name__ == "__main__":
-    # 测试改进的模型
+    # 测试优化的模型
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     print("=" * 60)
-    print("测试改进的Diffusion Policy (小数据集优化)")
+    print("测试优化的Diffusion Policy (24GB GPU配置)")
     print("=" * 60)
     
-    # 使用推荐的小数据集配置
+    # 使用24GB GPU优化配置
     model = create_improved_diffusion_policy(
-        num_cameras=1,
-        num_diffusion_steps=50,  # 关键：减少步数
-        hidden_dim=256,
-        num_layers=3,
-        dropout=0.2,
-        clip_range=(-5.0, 5.0)  # 根据您的动作空间调整
+        num_cameras=4,
+        num_diffusion_steps=200,  # 显著增加步数
+        hidden_dim=1024,  # 大幅增加容量
+        vision_feature_dim=1024,
+        num_layers=12,  # 更深的网络
+        num_heads=16,  # 更多注意力头
+        dropout=0.05,  # 减少dropout
+        clip_range=(-2.0, 2.0)  # RLBench动作空间
     ).to(device)
     
-    batch_size = 4
-    seq_len = 4
+    batch_size = 8  # 利用24GB显存
+    seq_len = 8  # 更长序列
     action_horizon = 4
     
-    # 模拟输入数据
-    images = torch.randn(batch_size, seq_len, 3, 224, 224).to(device)
+    # 模拟多相机输入数据
+    images = torch.randn(batch_size, 4, seq_len, 3, 256, 256).to(device)  # 4相机，更高分辨率
     robot_states = torch.randn(batch_size, seq_len, 15).to(device)
-    actions = torch.randn(batch_size, action_horizon, 8).to(device) * 2  # 模拟合理范围
-    timesteps = torch.randint(0, 50, (batch_size,)).to(device)
+    actions = torch.randn(batch_size, action_horizon, 8).to(device) * 1.0  # RLBench动作范围
+    timesteps = torch.randint(0, 200, (batch_size,)).to(device)  # 匹配新的扩散步数
     
     # 测试前向传播
     noisy_actions, noise = model.add_noise(actions, timesteps)
@@ -499,11 +651,17 @@ if __name__ == "__main__":
     print(f"采样动作形状: {sampled_actions.shape}")
     print(f"采样动作范围: [{sampled_actions.min():.3f}, {sampled_actions.max():.3f}]")
     
-    print("\n主要改进:")
-    print("1. 扩散步数: 1000 -> 50")
-    print("2. 模型规模: 减小hidden_dim和层数")
-    print("3. 正则化: 增加dropout和LayerNorm")
-    print("4. 数值稳定: 裁剪和改进的噪声调度")
-    print("5. 采样方法: 使用DDIM采样")
+    print(f"GPU内存使用: {torch.cuda.memory_allocated()/1024**3:.2f}GB" if torch.cuda.is_available() else "CPU模式")
     
-    print("\n测试完成!")
+    print("\n24GB GPU优化改进:")
+    print("1. 扩散步数: 50 -> 200 (4倍提升)")
+    print("2. 模型规模: hidden_dim=1024, layers=12 (显著增加)")
+    print("3. 多相机支持: 4个相机，注意力融合")
+    print("4. 图像分辨率: 224x224 -> 256x256")
+    print("5. 视觉编码器: 增强卷积网络+空间注意力")
+    print("6. 正则化: dropout=0.05 防止欠拟合")
+    print("7. 数值稳定: cosine噪声调度+梯度裁剪")
+    print("8. 采样优化: DDIM采样+动作范围裁剪")
+    print("9. RLBench优化: 动作范围(-2,2)，序列长度8")
+    
+    print("\n优化测试完成! 模型已针对24GB GPU和RLBench任务优化。")
