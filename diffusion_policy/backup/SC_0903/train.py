@@ -505,14 +505,11 @@ class SimpleTrainer:
         print(f"最佳验证损失: {self.best_val_loss:.4f}")
 
 
-def create_optimized_config(task_name: str = None) -> Dict:
+def create_optimized_config() -> Dict:
     """创建24GB GPU优化配置 - 针对RLBench任务"""
-    base_dataset_path = '/home/alien/Dataset/dataset'
-    dataset_path = f'{base_dataset_path}/{task_name}' if task_name else '/home/alien/simulation/robot-colosseum/dataset/wipe_desk_poor'
-    
     return {
         # 数据配置 - 优化用于更大批次
-        'dataset_path': dataset_path,
+        'dataset_path': '/home/alien/simulation/robot-colosseum/dataset/wipe_desk',
         'batch_size': 32,  # 利用24GB显存增加batch size
         'sequence_length': 8,  # 增加序列长度以提供更多时序信息
         'action_horizon': 4,  # 增加动作预测范围
@@ -574,7 +571,7 @@ def create_optimized_config(task_name: str = None) -> Dict:
         'ema_decay': 0.9999,
         
         # 保存配置
-        'save_dir': f'/home/alien/simulation/robot-colosseum/diffusion_policy/{task_name}_model' if task_name else '/home/alien/simulation/robot-colosseum/diffusion_policy/enhanced_model',
+        'save_dir': '/home/alien/simulation/robot-colosseum/diffusion_policy/enhanced_model',
         'save_every_n_epochs': 10,  # 定期保存
         
         # 推理参数（供inference脚本读取）
@@ -588,25 +585,40 @@ def create_optimized_config(task_name: str = None) -> Dict:
     }
 
 
-def train_single_task(task_name: str, config_overrides: Dict = None):
-    """训练单个任务"""
-    print(f"\n{'='*80}")
-    print(f"开始训练任务: {task_name}")
-    print(f"{'='*80}")
+def main():
+    parser = argparse.ArgumentParser(description='Diffusion Policy训练（多相机支持）')
+    parser.add_argument('--config', type=str, help='配置文件路径 (JSON)')
+    parser.add_argument('--epochs', type=int, default=50, help='训练轮数')
+    parser.add_argument('--batch_size', type=int, default=8, help='批次大小')
+    parser.add_argument('--lr', type=float, default=1e-4, help='学习率')
+    parser.add_argument('--save_dir', type=str, default=f'/home/alien/simulation/robot-colosseum/diffusion_policy/my_model/{time.strftime("%Y%m%d_%H%M%S")}', 
+                        help='保存目录')
+    
+    args = parser.parse_args()
     
     # 创建配置
-    config = create_optimized_config(task_name)
+    if args.config:
+        with open(args.config, 'r') as f:
+            config = json.load(f)
+    else:
+        config = create_optimized_config()  # 使用优化配置
     
-    # 应用命令行参数覆盖
-    if config_overrides:
-        config.update(config_overrides)
+    # 命令行参数覆盖配置
+    if args.epochs:
+        config['num_epochs'] = args.epochs
+    if args.batch_size:
+        config['batch_size'] = args.batch_size
+    if args.lr:
+        config['learning_rate'] = args.lr
+    if args.save_dir:
+        config['save_dir'] = args.save_dir
     
     # 设置设备
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"使用设备: {device}")
     
     # 创建数据加载器
-    print(f"创建数据加载器... (路径: {config['dataset_path']})")
+    print("创建数据加载器...")
     try:
         train_loader, val_loader = create_data_loaders(
             dataset_path=config['dataset_path'],
@@ -633,7 +645,7 @@ def train_single_task(task_name: str, config_overrides: Dict = None):
         print(f"3. 批次大小: {config['batch_size']}")
         import traceback
         traceback.print_exc()
-        return False
+        return
     
     # 将动作归一化统计写入配置，供推理时反归一化使用
     try:
@@ -679,203 +691,7 @@ def train_single_task(task_name: str, config_overrides: Dict = None):
     )
     
     # 开始训练
-    try:
-        trainer.train()
-        print(f"\n✅ 任务 {task_name} 训练完成!")
-        print(f"模型保存路径: {config['save_dir']}")
-        return True
-    except Exception as e:
-        print(f"\n❌ 任务 {task_name} 训练失败: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-
-
-def main():
-    parser = argparse.ArgumentParser(description='Diffusion Policy训练（多相机支持）')
-    parser.add_argument('--config', type=str, help='配置文件路径 (JSON)')
-    parser.add_argument('--epochs', type=int, default=50, help='训练轮数')
-    parser.add_argument('--batch_size', type=int, default=8, help='批次大小')
-    parser.add_argument('--lr', type=float, default=1e-4, help='学习率')
-    parser.add_argument('--save_dir', type=str, help='保存目录（单任务模式使用）')
-    parser.add_argument('--task', type=str, help='训练特定任务，不指定则训练所有任务')
-    parser.add_argument('--all_tasks', action='store_true', help='训练所有任务')
-    
-    args = parser.parse_args()
-    
-    # 准备配置覆盖项
-    config_overrides = {}
-    if args.epochs:
-        config_overrides['num_epochs'] = args.epochs
-    if args.batch_size:
-        config_overrides['batch_size'] = args.batch_size
-    if args.lr:
-        config_overrides['learning_rate'] = args.lr
-    if args.save_dir:
-        config_overrides['save_dir'] = args.save_dir
-    
-    # 如果指定了配置文件，从文件读取配置覆盖项
-    if args.config:
-        with open(args.config, 'r') as f:
-            file_config = json.load(f)
-            config_overrides.update(file_config)
-    
-    # 获取所有任务列表
-    dataset_base_path = '/home/alien/Dataset/dataset'
-    all_tasks = [d for d in os.listdir(dataset_base_path) 
-                 if os.path.isdir(os.path.join(dataset_base_path, d))]
-    all_tasks.sort()  # 按字母顺序排序
-    
-    print(f"发现 {len(all_tasks)} 个任务:")
-    for i, task in enumerate(all_tasks, 1):
-        print(f"  {i:2d}. {task}")
-    
-    # 确定要训练的任务
-    if args.task:
-        # 训练指定任务
-        if args.task in all_tasks:
-            tasks_to_train = [args.task]
-            print(f"\n将训练指定任务: {args.task}")
-        else:
-            print(f"错误: 任务 '{args.task}' 不存在!")
-            print(f"可用任务: {', '.join(all_tasks)}")
-            return
-    elif args.all_tasks or len(args.__dict__) == 0 or not any([args.config, args.task]):
-        # 训练所有任务（默认行为）
-        tasks_to_train = all_tasks
-        print(f"\n将训练所有 {len(tasks_to_train)} 个任务")
-    else:
-        # 单任务训练（向后兼容）
-        print("\n使用单任务模式...")
-        config = create_optimized_config()
-        config.update(config_overrides)
-        
-        # 设置设备
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        print(f"使用设备: {device}")
-        
-        # 创建数据加载器
-        print("创建数据加载器...")
-        try:
-            train_loader, val_loader = create_data_loaders(
-                dataset_path=config['dataset_path'],
-                batch_size=config['batch_size'],
-                sequence_length=config['sequence_length'],
-                action_horizon=config['action_horizon'],
-                num_workers=config['num_workers'],
-                image_size=config['image_size'],
-                normalize_actions=config['normalize_actions'],
-                cameras=config['cameras'],
-                image_types=config['image_types'],
-                load_depth=config['load_depth'],
-                load_point_clouds=config['load_point_clouds'],
-                subsample_factor=config['subsample_factor'],
-                max_episodes_per_task=config['max_episodes_per_task'],
-                require_all_cameras=config.get('require_all_cameras', True)
-            )
-        except Exception as e:
-            print(f"创建数据加载器失败: {e}")
-            print(f"错误详情: {str(e)}")
-            print("请检查:")
-            print(f"1. 数据集路径: {config['dataset_path']}")
-            print(f"2. 相机配置: {config['cameras']}")
-            print(f"3. 批次大小: {config['batch_size']}")
-            import traceback
-            traceback.print_exc()
-            return
-        
-        # 将动作归一化统计写入配置，供推理时反归一化使用
-        try:
-            if hasattr(train_loader, 'dataset') and hasattr(train_loader.dataset, 'action_mean') and hasattr(train_loader.dataset, 'action_std'):
-                action_mean = getattr(train_loader.dataset, 'action_mean', None)
-                action_std = getattr(train_loader.dataset, 'action_std', None)
-                if action_mean is not None and action_std is not None:
-                    # 转成可序列化的列表
-                    config['action_mean'] = [float(x) for x in np.array(action_mean).tolist()]
-                    config['action_std'] = [float(x) for x in np.array(action_std).tolist()]
-                    print("已将动作归一化统计保存到配置中: action_mean/std")
-        except Exception as stats_err:
-            print(f"警告: 无法将动作统计保存到配置: {stats_err}")
-        
-        # 创建模型
-        print("创建增强模型...")
-        model = create_improved_diffusion_policy(
-            action_dim=config['action_dim'],
-            action_horizon=config['action_horizon'],
-            state_dim=config['state_dim'],
-            vision_feature_dim=config['vision_feature_dim'],
-            hidden_dim=config['hidden_dim'],
-            num_diffusion_steps=config['num_diffusion_steps'],
-            num_layers=config['num_layers'],
-            num_heads=config['num_heads'],
-            dropout=config['dropout'],
-            num_cameras=config.get('num_cameras', 1),
-            fusion_method=config.get('fusion_method', 'attention'),
-            prediction_type=config.get('prediction_type', 'epsilon'),
-            clip_range=(-2.0, 2.0),  # RLBench适合的动作范围
-            use_ema=config.get('use_ema', True)
-        )
-        
-        print(f"模型参数数量: {sum(p.numel() for p in model.parameters()):,}")
-        
-        # 创建训练器
-        trainer = SimpleTrainer(
-            model=model,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            device=device,
-            config=config
-        )
-        
-        # 开始训练
-        trainer.train()
-        return
-    
-    # 多任务训练模式
-    print(f"\n{'='*100}")
-    print(f"开始多任务训练模式")
-    print(f"{'='*100}")
-    
-    successful_tasks = []
-    failed_tasks = []
-    
-    total_start_time = time.time()
-    
-    for i, task_name in enumerate(tasks_to_train, 1):
-        print(f"\n🚀 进度: {i}/{len(tasks_to_train)} - 当前任务: {task_name}")
-        
-        task_start_time = time.time()
-        success = train_single_task(task_name, config_overrides)
-        task_duration = time.time() - task_start_time
-        
-        if success:
-            successful_tasks.append(task_name)
-            print(f"✅ {task_name} 训练成功 (耗时: {task_duration/3600:.1f}h)")
-        else:
-            failed_tasks.append(task_name)
-            print(f"❌ {task_name} 训练失败 (耗时: {task_duration/3600:.1f}h)")
-    
-    total_duration = time.time() - total_start_time
-    
-    # 训练总结
-    print(f"\n{'='*100}")
-    print(f"训练总结")
-    print(f"{'='*100}")
-    print(f"总耗时: {total_duration/3600:.1f} 小时")
-    print(f"成功训练: {len(successful_tasks)}/{len(tasks_to_train)} 个任务")
-    
-    if successful_tasks:
-        print(f"\n✅ 成功的任务 ({len(successful_tasks)}):")
-        for task in successful_tasks:
-            print(f"  - {task}")
-    
-    if failed_tasks:
-        print(f"\n❌ 失败的任务 ({len(failed_tasks)}):")
-        for task in failed_tasks:
-            print(f"  - {task}")
-    
-    print(f"\n模型保存在: /home/alien/simulation/robot-colosseum/diffusion_policy/{{task_name}}_model/")
-    print(f"{'='*100}")
+    trainer.train()
 
 
 if __name__ == "__main__":

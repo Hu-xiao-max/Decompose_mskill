@@ -306,7 +306,7 @@ def main():
     # 任务配置
     class_task_name = 'WipeDesk'
     # 默认加载存在的最新模型目录（可通过命令行覆盖）
-    load_path = '/home/alien/simulation/robot-colosseum/diffusion_policy/my_model/wipe_desk_model'
+    load_path = '/home/alien/simulation/robot-colosseum/diffusion_policy/my_model/WipeDesk2'
     
     
     parser = argparse.ArgumentParser(description='多相机Diffusion Policy推理')
@@ -383,26 +383,12 @@ def main():
     
     # 获取任务
     task_mapping = {
-        'BasketballInHoop': 'colosseum.rlbench.tasks.basketball_in_hoop.BasketballInHoop',
         'CloseBox': 'colosseum.rlbench.tasks.close_box.CloseBox',
-        'CloseLaptopLid': 'colosseum.rlbench.tasks.close_laptop_lid.CloseLaptopLid',
-        'EmptyDishwasher': 'colosseum.rlbench.tasks.empty_dishwasher.EmptyDishwasher',
-        'GetIceFromFridge': 'colosseum.rlbench.tasks.get_ice_from_fridge.GetIceFromFridge',
-        'Hockey': 'colosseum.rlbench.tasks.hockey.Hockey',
-        'InsertOntoSquarePeg': 'colosseum.rlbench.tasks.insert_onto_square_peg.InsertOntoSquarePeg',
-        'MeatOnGrill': 'colosseum.rlbench.tasks.meat_on_grill.MeatOnGrill',
-        'MoveHanger': 'colosseum.rlbench.tasks.move_hanger.MoveHanger',
+        'BasketballInHoop': 'colosseum.rlbench.tasks.basketball_in_hoop.BasketballInHoop',
         'OpenDrawer': 'colosseum.rlbench.tasks.open_drawer.OpenDrawer',
-        'PlaceWineAtRackLocation': 'colosseum.rlbench.tasks.place_wine_at_rack_location.PlaceWineAtRackLocation',
-        'PutMoneyInSafe': 'colosseum.rlbench.tasks.put_money_in_safe.PutMoneyInSafe',
-        'ReachAndDrag': 'colosseum.rlbench.tasks.reach_and_drag.ReachAndDrag',
-        'ScoopWithSpatula': 'colosseum.rlbench.tasks.scoop_with_spatula.ScoopWithSpatula',
-        'SetupChess': 'colosseum.rlbench.tasks.setup_chess.SetupChess',
-        'SlideBlockToTarget': 'colosseum.rlbench.tasks.slide_block_to_target.SlideBlockToTarget',
         'StackCups': 'colosseum.rlbench.tasks.stack_cups.StackCups',
-        'StraightenRope': 'colosseum.rlbench.tasks.straighten_rope.StraightenRope',
-        'TurnOvenOn': 'colosseum.rlbench.tasks.turn_oven_on.TurnOvenOn',
         'WipeDesk': 'colosseum.rlbench.tasks.wipe_desk.WipeDesk',
+        'Hockey': 'colosseum.rlbench.tasks.hockey.Hockey',
     }
     
     if args.task in task_mapping:
